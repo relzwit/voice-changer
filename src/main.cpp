@@ -264,7 +264,7 @@ int main() {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
 
-        // // Wait for audio to physically play out completely
+        // // Wait f    or audio to physically play out completely
         if (input > 0 && g_last_recording.size() > 0) {
              float duration = (float)g_last_recording.size() / (48000.0f * 2.0f);
              std::this_thread::sleep_for(std::chrono::milliseconds((int)(duration * 1000) + 500));
