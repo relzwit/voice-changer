@@ -1,0 +1,5 @@
+# Ignore everything in the models folder
+models/*
+
+# ...But do not ignore the README.md
+!models/README.md
