@@ -3,3 +3,5 @@ models/*
 
 # ...But do not ignore the README.md
 !models/README.md
+
+venv/
