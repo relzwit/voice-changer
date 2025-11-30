@@ -10,7 +10,7 @@
 #include <limits>
 #include <future>
 
-#define MINIAUDIO_IMPLEMENTATION // // Defines the audio implementation in this translation unit.
+#define MINIAUDIO_IMPLEMENTATION
 #include <miniaudio.h>
 
 #include "Utils.h"
@@ -19,8 +19,8 @@
 
 // --- GLOBAL SETTINGS ---
 struct AppConfig {
-    float pitch_shift_semitones = 12.0f; // // Current pitch shift setting (+12 semitones = 1 octave).
-    float recording_duration = 5.0f;     // // Current fixed recording duration.
+    float pitch_shift_semitones = 12.0f; // +12 semitones = 1 octave
+    float recording_duration = 5.0f;
 } g_config;
 
 // --- STATE FLAGS AND BUFFERS ---
@@ -36,7 +36,7 @@ std::vector<float> g_last_recording;
 PythonBridge g_bridge;
 
 #define INTERNAL_CHANNELS 2
-#define INTERNAL_SAMPLE_RATE 48000
+#define INTERNAL_SAMPLE_RATE 48000 // keep system at 48k (safer for RNNoise/hardware)
 
 // --- AUDIO HELPERS (Required by data_callback) ---
 void convert_to_internal(const float* pInput, float* pInternalBuffer, ma_uint32 frameCount, ma_uint32 hwChannels) {
@@ -65,7 +65,7 @@ void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
     ma_uint32 framesRead = toRead / INTERNAL_CHANNELS;
     if (framesRead > 0) convert_from_internal(tempOutput, (float*)pOutput, framesRead, pDevice->playback.channels);
 
-    // // Silence Fill: Ensures speakers don't play garbage memory if the buffer runs out.
+    // Silence Fill
     if (framesRead < frameCount) {
         ma_uint32 remaining = (frameCount - framesRead) * pDevice->playback.channels;
         ma_uint32 offset    = framesRead * pDevice->playback.channels;
@@ -74,7 +74,7 @@ void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
     }
 }
 
-// --- PROCESSING THREAD (The Slow Thread) ---
+// --- PROCESSING THREAD (Slow Thread) ---
 void processing_thread_func() {
     DenoiseEngine denoiser;
     const float INPUT_GAIN = 4.0f;
@@ -94,7 +94,7 @@ void processing_thread_func() {
         if (g_rb_input.AvailableRead() >= WORK_SIZE) {
             g_rb_input.Read(input_chunk.data(), WORK_SIZE);
 
-            // 1. Mono Mix + Denoise
+            // 1. Mono Mix + Denoise (denoiser runs at 48k in this pipeline)
             std::vector<float> mono(WORK_SIZE / 2);
             for(size_t i=0; i<mono.size(); ++i) mono[i] = (input_chunk[i*2] + input_chunk[i*2+1]) * 0.5f;
             denoiser.Process(mono);
@@ -102,19 +102,19 @@ void processing_thread_func() {
             // 2. Gain & Soft Limit
             for(float& s : mono) { s *= INPUT_GAIN; s = std::tanh(s); }
 
-            // 3. RMS Calculation (For Calibration/Gate)
+            // 3. RMS Calculation (Calibration/Gate)
             float sum = 0.0f;
             for(float s : mono) sum += s*s;
             float rms = std::sqrt(sum / mono.size());
 
-            // --- CALIBRATION PHASE ---
+            // --- CALIBRATION ---
             if (is_calibrating) {
                 calibration_frames++;
-                if (calibration_frames > 50) { // // Ignore initial 1s pop
+                if (calibration_frames > 50) {
                     if (rms > max_noise_rms) max_noise_rms = rms;
                     if (calibration_frames % 10 == 0) std::cout << "." << std::flush;
                 }
-                if (calibration_frames > 150) { // // Total ~3s calibration duration
+                if (calibration_frames > 150) {
                     is_calibrating = false;
                     float GATE_THRESH = max_noise_rms + 0.015f;
                     std::cout << "\n[CALIBRATION DONE] Gate: " << GATE_THRESH << std::endl;
@@ -136,7 +136,7 @@ void processing_thread_func() {
                 continue;
             }
 
-            // If not recording, discard data
+            // If not recording, discard
             if (!g_is_recording) {
                 if (!burst_buffer.empty()) burst_buffer.clear();
                 continue;
@@ -145,25 +145,25 @@ void processing_thread_func() {
             // --- RECORDING LOGIC ---
             burst_buffer.insert(burst_buffer.end(), mono.begin(), mono.end());
 
-            // 4. UI Update
-            size_t target_samples = (size_t)(g_config.recording_duration * 48000);
+            // UI Update
+            size_t target_samples = static_cast<size_t>(g_config.recording_duration * INTERNAL_SAMPLE_RATE);
             if (burst_buffer.size() % 4096 == 0) {
                 std::cout << "\r[REC] " << std::fixed << std::setprecision(1)
-                          << (float)burst_buffer.size() / 48000.0f << "s / "
+                          << (float)burst_buffer.size() / INTERNAL_SAMPLE_RATE << "s / "
                           << g_config.recording_duration << "s   " << std::flush;
             }
 
-            // 5. Check Duration & Trigger Processing
+            // Check Duration & Trigger Processing
             if (burst_buffer.size() >= target_samples) {
                 g_is_processing = true;
 
-                // ASYNC TASK: Launch Python processing in background
+                // ASYNC TASK: Resample 48k -> 40k then call Python
                 auto future_result = std::async(std::launch::async, [&]() {
-                    auto audio_16k = Resample48To16(burst_buffer);
-                    return g_bridge.ProcessAudio(audio_16k, g_config.pitch_shift_semitones);
+                    auto audio_40k = Resample48To40(burst_buffer); // <-- important: 40k for the RVC model
+                    return g_bridge.ProcessAudio(audio_40k, static_cast<int>(g_config.pitch_shift_semitones));
                 });
 
-                // SPINNER UI
+                // Spinner UI
                 const char spinner[] = {'|', '/', '-', '\\'};
                 int spin_idx = 0;
                 while (future_result.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready) {
@@ -171,10 +171,10 @@ void processing_thread_func() {
                     spin_idx = (spin_idx + 1) % 4;
                 }
 
-                auto processed = future_result.get();
+                auto processed = future_result.get(); // processed is expected to be 48k float samples (see server.py)
 
                 if (!processed.empty()) {
-                    // // FINAL FIX: Elastic Resampling to match duration exactly.
+                    // Final fix: Elastic resample to match original sample count exactly.
                     auto output = ResampleToCount(processed, burst_buffer.size());
 
                     std::vector<float> stereo;
@@ -205,23 +205,23 @@ int main() {
     std::cout << "      RVC VOICE CHANGER - C++ CLIENT    " << std::endl;
     std::cout << "========================================" << std::endl;
 
-    // // 1. CONNECT TO PYTHON
+    // 1. CONNECT TO PYTHON
     std::cout << "Launching Python Bridge... Ensure 'server.py' is running!" << std::endl;
     while (!g_bridge.Connect()) {
         std::cout << "Retrying connection in 2s..." << std::endl;
         std::this_thread::sleep_for(std::chrono::seconds(2));
     }
 
-    // // 2. INITIALIZE BUFFERS (30s capacity for safety)
+    // 2. INITIALIZE BUFFERS
     g_rb_input.Init(48000 * 30 * INTERNAL_CHANNELS);
     g_rb_output.Init(48000 * 30 * INTERNAL_CHANNELS);
 
-    // // 3. CONFIGURE MINIAUDIO DEVICE
+    // 3. CONFIGURE MINIAUDIO DEVICE (keep device at 48k)
     ma_device_config config = ma_device_config_init(ma_device_type_duplex);
     config.sampleRate = INTERNAL_SAMPLE_RATE;
     config.capture.format = ma_format_f32;
     config.playback.format = ma_format_f32;
-    config.dataCallback = data_callback; // // Links the low-level driver to our C++ function.
+    config.dataCallback = data_callback;
     config.periodSizeInFrames = 4096;
     config.periods = 3;
 
@@ -231,11 +231,11 @@ int main() {
         return -1;
     }
 
-    // // 4. START THREADS
+    // 4. START THREADS
     std::thread ai_thread(processing_thread_func);
     if (ma_device_start(&device) != MA_SUCCESS) return -1;
 
-    // // 5. UI LOOP
+    // 5. UI LOOP
     while (true) {
         std::cout << "\n----------------------------------------" << std::endl;
         std::cout << "### enter recording length (seconds):" << std::endl;
@@ -249,7 +249,7 @@ int main() {
             continue;
         }
 
-        if (input == 0) break; // // Quit command
+        if (input == 0) break;
 
         if (input == -1) {
             g_is_replaying = true;
@@ -259,20 +259,18 @@ int main() {
             g_is_recording = true;
         }
 
-        // // Wait for background work to complete
         while (g_is_recording || g_is_processing) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
 
-        // // Wait f    or audio to physically play out completely
         if (input > 0 && g_last_recording.size() > 0) {
-             float duration = (float)g_last_recording.size() / (48000.0f * 2.0f);
-             std::this_thread::sleep_for(std::chrono::milliseconds((int)(duration * 1000) + 500));
+             float duration = static_cast<float>(g_last_recording.size()) / (static_cast<float>(INTERNAL_SAMPLE_RATE) * 2.0f);
+             std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int>(duration * 1000) + 500));
         }
     }
 
     g_running = false;
-    ai_thread.join(); // // Wait for the worker thread to exit cleanly.
-    ma_device_uninit(&device); // // Release the audio hardware.
+    ai_thread.join();
+    ma_device_uninit(&device);
     return 0;
 }

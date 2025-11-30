@@ -3,7 +3,7 @@
 #include <cstring>
 #include <vector>
 
-#define PORT 5555 // // The dedicated communication port.
+#define PORT 5555 // The dedicated communication port.
 
 PythonBridge::PythonBridge() {}
 
@@ -43,8 +43,8 @@ std::vector<float> PythonBridge::ProcessAudio(const std::vector<float>& input, i
         int32_t pitch;
     } header;
 
-    header.sample_count = (int32_t)input.size();
-    header.pitch = (int32_t)pitch_semitones;
+    header.sample_count = static_cast<int32_t>(input.size());
+    header.pitch = static_cast<int32_t>(pitch_semitones);
 
     // --- 2. SEND HEADER (8 Bytes) ---
     if (send(sock, &header, sizeof(header), 0) < 0) {
@@ -52,7 +52,7 @@ std::vector<float> PythonBridge::ProcessAudio(const std::vector<float>& input, i
         close(sock); connected = false; return {};
     }
 
-    // --- 3. SEND AUDIO ---
+    // --- 3. SEND AUDIO (float32 PCM at 40k) ---
     if (send(sock, input.data(), input.size() * sizeof(float), 0) < 0) {
         std::cerr << "[BRIDGE] Send Audio Failed" << std::endl;
         close(sock); connected = false; return {};
@@ -69,13 +69,13 @@ std::vector<float> PythonBridge::ProcessAudio(const std::vector<float>& input, i
     // --- 5. RECEIVE AUDIO DATA (Loop for large data) ---
     std::vector<float> output(response_size);
     size_t total_read = 0;
-    size_t bytes_to_read = response_size * sizeof(float);
-    char* ptr = (char*)output.data();
+    size_t bytes_to_read = static_cast<size_t>(response_size) * sizeof(float);
+    char* ptr = reinterpret_cast<char*>(output.data());
 
     while (total_read < bytes_to_read) {
-        valread = read(sock, ptr + total_read, bytes_to_read - total_read);
+        valread = read(sock, ptr + total_read, static_cast<int>(bytes_to_read - total_read));
         if (valread <= 0) break;
-        total_read += valread;
+        total_read += static_cast<size_t>(valread);
     }
 
     return output;
