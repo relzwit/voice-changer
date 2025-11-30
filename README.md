@@ -1,4 +1,4 @@
-🚀 RVC Voice Changer: Adaptive Python Bridge (CLI)
+🚀 RVC Voice Changer: Adaive Python Bridge (CLI)
 
 This is a high-performance, cross-platform voice changer application designed to run Retrieval-based Voice Conversion (RVC) models with minimal latency on systems of varying capabilities.
 
