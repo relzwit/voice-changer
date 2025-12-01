@@ -3,24 +3,27 @@
 
 #include <vector>
 #include <string>
-#include <sys/socket.h>     // // Core networking functions.
-#include <arpa/inet.h>      // // IP address handling.
-#include <unistd.h>         // // Standard Unix utilities (close socket).
+#include <sys/socket.h> // // Linux socket headers.
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <netinet/in.h>
+#include <cstdint>
 
 class PythonBridge {
 private:
-    int sock = -1;                     // // Socket file descriptor ID.
-    struct sockaddr_in serv_addr;      // // Server address structure.
-    bool connected = false;
+   int sock = -1;
+   struct sockaddr_in serv_addr{};
+   bool connected = false;
 
 public:
-    PythonBridge();
-    ~PythonBridge();
+   PythonBridge();
+   ~PythonBridge();
 
-    bool Connect();
+   bool Connect();
+   void Disconnect();
 
-    // // Sends 16kHz audio data and pitch command to Python.
-    std::vector<float> ProcessAudio(const std::vector<float>& input_audio, int pitch_semitones);
+   // // Function to send audio and pitch data to Python and get processed audio back.
+   std::vector<float> ProcessAudio(const std::vector<float>& input_audio, int pitch_semitones);
 };
 
 #endif //VOICE_CHANGER_PYTHONBRIDGE_H

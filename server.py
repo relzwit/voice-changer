@@ -2,24 +2,24 @@ import socket
 import struct
 import numpy as np
 import onnxruntime as ort
+import time
+import sys
+import traceback
+import librosa
 import torch
 import torchcrepe
-import sys
-import librosa
-import traceback
 
-# --- CONFIG ---
+# CONFIG
 HOST = '127.0.0.1'
-PORT = 5555
+PORT = 51235
 MODEL_PATH = "models/voice.onnx"
 HUBERT_PATH = "models/hubert.onnx"
+MODEL_SAMPLE_RATE = 40000
+TARGET_SAMPLE_RATE = 48000
+INPUT_SR = 40000 # // C++ sends 40k audio now.
 
-MODEL_SAMPLE_RATE = 40000   # RVC trained sample rate (40k)
-TARGET_SAMPLE_RATE = 48000  # We return 48k audio so C++ can playback natively
-INPUT_SR = 40000            # The C++ side will send 40k audio now
-
-print(f"Python Version: {sys.version}")
-print("Loading Models...")
+print("Python Version:", sys.version)
+print("Loading models...")
 
 try:
     opts = ort.SessionOptions()
@@ -30,58 +30,60 @@ try:
 except Exception as e:
     print("CRITICAL MODEL LOAD ERROR:", e)
     traceback.print_exc()
-    exit(1)
+    sys.exit(1)
 
-
+# // --- PITCH EXTRACTION (TORCHCREPE) ---
 def get_f0(audio, sr=INPUT_SR):
     if not isinstance(audio, np.ndarray):
         audio = np.array(audio, dtype=np.float32)
+
     x = torch.from_numpy(audio.astype(np.float32)).unsqueeze(0)
+
+    # // High quality pitch detection using a neural network.
     f0 = torchcrepe.predict(
         x, sr,
         hop_length=128,
         fmin=50,
         fmax=1000,
-        model='full',
+        model='full', # // 'full' model is slower but more accurate than 'tiny'.
         batch_size=256,
         device='cpu',
         decoder=torchcrepe.decode.viterbi
     )
+
     return f0.squeeze(0).cpu().numpy()
 
-
+# // --- AUDIO PROCESSING ---
 def process_audio(data, pitch_shift):
     try:
         audio = np.frombuffer(data, dtype=np.float32)
+
         if len(audio) < 1600:
             return b''
 
-        # Hubert expects [1,1,time]
+        # // 1. Hubert Encoding
         inp = audio[np.newaxis, np.newaxis, :].astype(np.float32)
         embed = hubert_sess.run(["embed"], {"source": inp})[0]
 
-        # If hubert returned (1, 768, T) transpose to (1, T, 768)
+        # // FIX: Transpose shape if needed (1, 768, T) -> (1, T, 768)
         if embed.ndim == 3 and embed.shape[1] == 768:
             embed = np.transpose(embed, (0, 2, 1))
 
-        if embed.ndim != 3:
-            print("Unexpected embed shape:", embed.shape)
-            return b''
-
         T = embed.shape[1]
 
-        # Pitch detection at 40k
+        # // 2. Pitch Detection
         try:
             f0 = get_f0(audio, INPUT_SR)
         except Exception as e:
             print("[WARN] F0 failed:", e)
             f0 = np.zeros(T, dtype=np.float32)
 
+        # // 3. Pitch Shifting (The Math)
         f0 = np.asarray(f0, dtype=np.float32)
         factor = 2 ** (pitch_shift / 12.0)
-        f0 *= factor
+        f0 *= factor # // Apply the shift.
 
-        # Resize pitch curve to match T
+        # // Resample pitch curve to match the embedding length.
         if len(f0) != T:
             xp = np.arange(len(f0))
             x  = np.linspace(0, len(f0) - 1, T)
@@ -100,26 +102,19 @@ def process_audio(data, pitch_shift):
             "sid": sid
         }
 
+        # // 4. Run RVC Model
         out = voice_sess.run(["audio"], inputs)[0]
         out = np.squeeze(out).astype(np.float32)
 
         if out.ndim > 1:
             out = out.reshape(-1)
 
-        # Resample model output (40k) -> 48k for playback
+        # // 5. Resample (40k -> 48k)
         if MODEL_SAMPLE_RATE != TARGET_SAMPLE_RATE:
             try:
                 out = librosa.resample(out, orig_sr=MODEL_SAMPLE_RATE, target_sr=TARGET_SAMPLE_RATE)
             except Exception as e:
                 print("[WARN] resample failed:", e)
-                src_len = out.shape[0]
-                tgt_len = int(src_len * (TARGET_SAMPLE_RATE / float(MODEL_SAMPLE_RATE)))
-                if src_len > 1 and tgt_len > 0:
-                    xp = np.linspace(0, src_len - 1, src_len)
-                    x = np.linspace(0, src_len - 1, tgt_len)
-                    out = np.interp(x, xp, out).astype(np.float32)
-                else:
-                    out = np.array([], dtype=np.float32)
 
         return out.astype(np.float32).tobytes()
 
@@ -128,7 +123,7 @@ def process_audio(data, pitch_shift):
         traceback.print_exc()
         return b''
 
-
+# // --- SERVER LOOP ---
 def recvall(sock, n):
     data = b''
     while len(data) < n:
@@ -137,7 +132,6 @@ def recvall(sock, n):
             return None
         data += chunk
     return data
-
 
 print("Waiting for C++ Client...")
 

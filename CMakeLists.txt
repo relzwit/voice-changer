@@ -1,15 +1,22 @@
+# // Sets the minimum version of CMake required to build this project.
 cmake_minimum_required(VERSION 3.20)
-project(voice-changer) # // Defines the name of the project.
 
-set(CMAKE_CXX_STANDARD 17) # // Sets the C++ standard to 17 (standard for modern C++ projects).
+# // Names the project "voice-changer".
+project(voice-changer)
 
-# 1. FIND DEPENDENCIES
-find_path(MINIAUDIO_INCLUDE_DIRS "miniaudio.h" REQUIRED) # // Finds the miniaudio header file.
-find_package(PkgConfig REQUIRED) # // Finds pkg-config for library discovery (standard Linux tool).
-pkg_check_modules(RNNOISE REQUIRED rnnoise) # // Checks if the RNNoise library is installed.
+# // Sets the C++ standard to 17 (Modern C++ features).
+set(CMAKE_CXX_STANDARD 17)
 
-# 2. DEFINE APP
-# // Defines the final executable and lists every source file that needs to be compiled.
+# // --- FIND DEPENDENCIES ---
+# // Search for the 'miniaudio.h' file path (for audio I/O).
+find_path(MINIAUDIO_INCLUDE_DIRS "miniaudio.h" REQUIRED)
+# // Search for the 'pkg-config' tool (helper to find system libraries on Linux).
+find_package(PkgConfig REQUIRED)
+# // Use pkg-config to find the 'rnnoise' library (AI Noise Suppression).
+pkg_check_modules(RNNOISE REQUIRED rnnoise)
+
+# // --- DEFINE APP ---
+# // Creates the executable 'voice_changer_app' from these specific source files.
 add_executable(voice_changer_app
         src/main.cpp
         src/PythonBridge.cpp
@@ -18,11 +25,12 @@ add_executable(voice_changer_app
         src/Utils.h
 )
 
-# 3. INCLUDES (Tells the compiler WHERE to look for header files)
+# // --- INCLUDE DIRECTORIES ---
+# // Tells the compiler where to look for header (.h) files.
 target_include_directories(voice_changer_app PRIVATE ${MINIAUDIO_INCLUDE_DIRS})
 target_include_directories(voice_changer_app PRIVATE ${RNNOISE_INCLUDE_DIRS})
 target_include_directories(voice_changer_app PRIVATE src)
 
-# 4. LINK LIBRARIES (Tells the linker WHAT compiled libraries to use)
-# // We link against RNNoise (the cleaner) and the default C++ libraries.
+# // --- LINK LIBRARIES ---
+# // Tells the linker to attach the compiled RNNoise library to our app.
 target_link_libraries(voice_changer_app PRIVATE ${RNNOISE_LIBRARIES})
