@@ -1,4 +1,3 @@
 - swap to RMVPE from Torchcrepe
-- find a 48k model
+- find a more fitting model
 - install a RMVPE version that can use both CPU and GPU
-- remove C++ audio pre-processing
