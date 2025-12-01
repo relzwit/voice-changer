@@ -13,7 +13,8 @@
 #include <future>
 #include <fstream>
 #include <string>
-#include <sstream> // For parsing strings
+#include <sstream>
+#include <ctime> // For generating unique filenames
 
 #define MINIAUDIO_IMPLEMENTATION
 #include <miniaudio.h>
@@ -22,7 +23,6 @@
 #include "PythonBridge.h"
 
 // --- CONFIGURATION MANAGEMENT ---
-// This simple function reads key/value pairs from the INI file
 void load_config(float& pitch_shift, float& duration) {
     std::ifstream file("config.ini");
     if (!file.is_open()) {
@@ -40,7 +40,6 @@ void load_config(float& pitch_shift, float& duration) {
         std::string key = line.substr(0, equalPos);
         std::string value = line.substr(equalPos + 1);
 
-        // Simple trim (basic implementation)
         key.erase(0, key.find_first_not_of(" \t"));
         key.erase(key.find_last_not_of(" \t") + 1);
         value.erase(0, value.find_first_not_of(" \t"));
@@ -58,6 +57,7 @@ void load_config(float& pitch_shift, float& duration) {
     }
 }
 // --- END CONFIGURATION MANAGEMENT ---
+
 
 // --- SETTINGS ---
 struct AppConfig {
@@ -80,6 +80,58 @@ PythonBridge g_bridge;
 
 #define INTERNAL_CHANNELS 2
 #define INTERNAL_SAMPLE_RATE 48000
+
+
+// --- WAV FILE UTILITY ---
+// This function manually constructs and writes a WAV header.
+bool SaveWavFile(const std::vector<float>& buffer, const std::string& filename, int channels, int sampleRate) {
+    if (buffer.empty()) return false;
+    std::ofstream file(filename, std::ios::binary);
+    if (!file.is_open()) return false;
+
+    // We save as 16-bit PCM (signed short), the most compatible format.
+    int bitsPerSample = 16;
+    long byteRate = sampleRate * channels * (bitsPerSample / 8);
+    long blockAlign = channels * (bitsPerSample / 8);
+    long dataSize = buffer.size() * (bitsPerSample / 8);
+    long chunkSize = 36 + dataSize;
+
+    // --- RIFF CHUNK ---
+    file.write("RIFF", 4);                                  // Chunk ID
+    file.write((char*)&chunkSize, 4);                       // Chunk Size (File size - 8)
+    file.write("WAVE", 4);                                  // Format
+
+    // --- FMT SUB-CHUNK ---
+    file.write("fmt ", 4);                                  // Sub-chunk 1 ID
+    int subChunk1Size = 16;
+    file.write((char*)&subChunk1Size, 4);                   // Sub-chunk 1 Size (16 for PCM)
+    short audioFormat = 1; // 1 = PCM (uncompressed)
+    file.write((char*)&audioFormat, 2);                     // Audio Format
+    short numChannels = (short)channels;
+    file.write((char*)&numChannels, 2);                     // Number of Channels
+    file.write((char*)&sampleRate, 4);                      // Sample Rate
+    file.write((char*)&byteRate, 4);                        // Byte Rate
+    file.write((char*)&blockAlign, 2);                      // Block Align
+    short bps = (short)bitsPerSample;
+    file.write((char*)&bps, 2);                             // Bits per Sample
+
+    // --- DATA SUB-CHUNK ---
+    file.write("data", 4);                                  // Sub-chunk 2 ID
+    file.write((char*)&dataSize, 4);                        // Data Size
+
+    // --- CONVERT AND WRITE DATA (float to 16-bit PCM) ---
+    std::vector<short> shortBuffer(buffer.size());
+    for (size_t i = 0; i < buffer.size(); ++i) {
+        // Clamp float [-1.0, 1.0] and scale to short [-32768, 32767]
+        float sample = std::max(-1.0f, std::min(1.0f, buffer[i]));
+        shortBuffer[i] = (short)(sample * 32767.0f);
+    }
+
+    file.write((char*)shortBuffer.data(), dataSize);
+    return true;
+}
+// --- END WAV FILE UTILITY ---
+
 
 // --- AUDIO HELPERS ---
 void convert_to_internal(const float* pInput, float* pInternalBuffer, ma_uint32 frameCount, ma_uint32 hwChannels) {
@@ -180,7 +232,7 @@ void processing_thread_func() {
                     for (float &s : burst_buffer) s *= normalization_factor;
                 }
 
-                // --- DEBUG MONITOR: PLAY RAW AUDIO BEFORE SENDING (Removed for simplicity, keep just log) ---
+                // --- DEBUG MONITOR ---
                 std::cout << "\n[PROCESSING] Sending " << burst_buffer.size() << " samples to AI..." << std::flush;
 
                 auto future_result = std::async(std::launch::async, [&]() {
@@ -252,24 +304,61 @@ int main() {
     std::thread ai_thread(processing_thread_func);
     if (ma_device_start(&device) != MA_SUCCESS) return -1;
 
+    std::string input_line;
     while (true) {
         std::cout << "\n----------------------------------------\n";
-        std::cout << "### enter recording length (s) (-1 to replay, 0 to Quit): ";
-        float input;
-        if (!(std::cin >> input)) { std::cin.clear(); std::cin.ignore(10000, '\n'); continue; }
+        std::cout << "### Enter command or seconds to record:\n";
+        std::cout << "### (-1: Replay, 's': Save Last Clip, 'q': Quit)\n";
+        std::cout << "> ";
 
-        if (input == 0) break;
-        if (input == -1) { g_is_replaying = true; g_is_processing = true; }
-        else {
-            // In a real app, you would ask for duration or check config here.
-            // For now, we take user input, but rely on loaded duration if no input is given.
-            g_config.recording_duration = input;
+        // Read the entire line of input
+        if (!std::getline(std::cin, input_line) || input_line.empty()) continue;
+
+        // --- COMMAND HANDLING ---
+        if (input_line == "q") break;
+
+        if (input_line == "s") {
+            if (g_last_recording.empty()) {
+                std::cout << "[ERROR] No audio clip to save. Record something first." << std::endl;
+                continue;
+            }
+            // Generate unique filename based on timestamp
+            std::time_t t = std::time(nullptr);
+            std::tm tm = *std::localtime(&t);
+            std::ostringstream oss;
+            oss << "output_" << std::put_time(&tm, "%Y%m%d_%H%M%S") << ".wav";
+            std::string filename = oss.str();
+
+            // g_last_recording is Stereo (2 channels)
+            if (SaveWavFile(g_last_recording, filename, 2, INTERNAL_SAMPLE_RATE)) {
+                std::cout << "[SUCCESS] Saved to " << filename << std::endl;
+            } else {
+                std::cout << "[ERROR] Failed to save file." << std::endl;
+            }
+            continue;
+        }
+
+        // --- NUMERIC INPUT HANDLING (Record/Replay) ---
+        float input_float = 0.0f;
+        try {
+            input_float = std::stof(input_line);
+        } catch (...) {
+            std::cout << "[ERROR] Invalid input. Enter seconds, 's', or 'q'." << std::endl;
+            continue;
+        }
+
+        if (input_float == -1) {
+            g_is_replaying = true;
+            g_is_processing = true;
+        } else {
+            g_config.recording_duration = input_float;
             g_is_recording = true;
         }
 
         while (g_is_recording || g_is_processing) std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-        if (input > 0 && g_last_recording.size() > 0) {
+        // Sleep to allow audio playback to finish
+        if (input_float > 0 && g_last_recording.size() > 0) {
             float duration = static_cast<float>(g_last_recording.size()) / (48000.0f * 2.0f);
             std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int>(duration*1000)+500));
         }
