@@ -1,12 +1,13 @@
-import socket             # // Networking library.
-import struct             # // Binary data packing.
-import numpy as np        # // Math library.
-import onnxruntime as ort # // AI Runtime.
-import torch              # // PyTorch.
-import torchcrepe         # // Pitch Detection.
+import socket             # Networking library.
+import struct             # Binary data packing.
+import numpy as np        # Math library.
+import onnxruntime as ort # AI Runtime.
+import torch              # PyTorch.
+import torchaudio         # <--- CHANGED: High quality, fast audio processing.
+import torchcrepe         # Pitch Detection.
 import sys
-import librosa            # // Audio processing.
-import traceback          # // Error logging.
+import traceback          # Error logging.
+import time               # Timer.
 
 # --- CONFIG ---
 HOST = '127.0.0.1'
@@ -19,12 +20,13 @@ TARGET_SAMPLE_RATE = 48000
 INPUT_SR = 40000
 
 print(f"Python Version: {sys.version}")
+print(f"PyTorch Version: {torch.__version__}")
 print("Loading Models...")
 
 try:
-    # // Configure ONNX to use all available CPU power.
+    # Configure ONNX to use all available CPU power.
     opts = ort.SessionOptions()
-    opts.intra_op_num_threads = 4 # // Allow parallel math.
+    opts.intra_op_num_threads = 4 # Allow parallel math.
     opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     opts.log_severity_level = 3
 
@@ -36,22 +38,35 @@ except Exception as e:
     traceback.print_exc()
     sys.exit(1)
 
-# --- PITCH DETECTION (OPTIMIZED) ---
+# --- INIT RESAMPLER GLOBALLY ---
+# We create the resampler once so we don't rebuild it every frame.
+# This combines speed with the high quality of 'librosa'.
+try:
+    resampler = torchaudio.transforms.Resample(
+        orig_freq=MODEL_SAMPLE_RATE,
+        new_freq=TARGET_SAMPLE_RATE,
+        dtype=torch.float32
+    )
+    print("Torchaudio Resampler Initialized.")
+except Exception as e:
+    print("Error initializing torchaudio:", e)
+    sys.exit(1)
+
+# --- PITCH DETECTION ---
 def get_f0(audio, sr=INPUT_SR):
     if not isinstance(audio, np.ndarray):
         audio = np.array(audio, dtype=np.float32)
 
-    # // Convert to PyTorch Tensor.
+    # Convert to PyTorch Tensor.
     x = torch.from_numpy(audio.astype(np.float32)).unsqueeze(0)
 
-    # // RUN CREPE (SPEED OPTIMIZED)
-    # // We changed model='full' -> 'tiny'. This is much faster.
+    # RUN CREPE (SPEED OPTIMIZED)
     f0 = torchcrepe.predict(
         x, sr,
-        hop_length=160,       # // Increased hop (160) = Faster scan.
+        hop_length=160,       # Increased hop (160) = Faster scan.
         fmin=50,
         fmax=1000,
-        model='tiny',         # // 'tiny' is lightweight and fast on CPU.
+        model='tiny',         # 'tiny' is lightweight and fast on CPU.
         batch_size=256,
         device='cpu',
         decoder=torchcrepe.decode.viterbi
@@ -62,7 +77,7 @@ def get_f0(audio, sr=INPUT_SR):
 # --- AUDIO PROCESSING ---
 def process_audio(data, pitch_shift):
     try:
-        t_start = time.time() # // Start timer.
+        t_start = time.time() # Start timer.
 
         audio = np.frombuffer(data, dtype=np.float32)
         if len(audio) < 1600: return b''
@@ -114,14 +129,21 @@ def process_audio(data, pitch_shift):
         if out.ndim > 1:
             out = out.reshape(-1)
 
-        # 6. Resample
+        # 6. Resample (Using Torchaudio)
         if MODEL_SAMPLE_RATE != TARGET_SAMPLE_RATE:
             try:
-                out = librosa.resample(out, orig_sr=MODEL_SAMPLE_RATE, target_sr=TARGET_SAMPLE_RATE)
+                # Convert Numpy -> Torch Tensor
+                out_tensor = torch.from_numpy(out)
+
+                # Resample (Fast & High Quality)
+                out_tensor = resampler(out_tensor)
+
+                # Convert Tensor -> Numpy
+                out = out_tensor.numpy()
             except Exception as e:
                 print("[WARN] resample failed:", e)
 
-        # // Print timing debug
+        # Print timing debug
         process_time = time.time() - t_start
         print(f"  -> AI processed {len(audio)/INPUT_SR:.2f}s audio in {process_time:.2f}s")
 
@@ -133,8 +155,6 @@ def process_audio(data, pitch_shift):
         return b''
 
 # --- NETWORK LOOP ---
-import time # // Re-import time for stats
-
 def recvall(sock, n):
     data = b''
     while len(data) < n:

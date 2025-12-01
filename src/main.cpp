@@ -9,8 +9,10 @@
 #include <chrono>
 #include <limits>
 #include <future>
+#include <fstream>  // <--- ADDED: Required for reading files
+#include <string>   // <--- ADDED: Required for string manipulation
 
-// // Audio Driver Implementation.
+// Audio Driver Implementation.
 #define MINIAUDIO_IMPLEMENTATION
 #include <miniaudio.h>
 
@@ -20,7 +22,7 @@
 
 // --- SETTINGS ---
 struct AppConfig {
-    float pitch_shift_semitones = 12.0f; // // +12 = 1 Octave Up.
+    float pitch_shift_semitones = 12.0f; // +12 = 1 Octave Up.
     float recording_duration = 5.0f;
 } g_config;
 
@@ -78,11 +80,15 @@ void processing_thread_func() {
     DenoiseEngine denoiser;
     const float INPUT_GAIN = 4.0f;
 
+    // OPTIMIZATION: Allocating vectors outside the loop to reuse memory
     std::vector<float> burst_buffer;
-    burst_buffer.reserve(48000 * 60);
+    burst_buffer.reserve(48000 * 60); // Reserve 60 seconds
 
     const size_t WORK_SIZE = 1024 * 2;
     std::vector<float> input_chunk(WORK_SIZE);
+
+    std::vector<float> mono;
+    mono.reserve(WORK_SIZE/2);
 
     while (g_running) {
         if (g_rb_input.AvailableRead() >= WORK_SIZE) {
@@ -108,8 +114,10 @@ void processing_thread_func() {
             }
 
             // 3. RECORDING
-            std::vector<float> mono(WORK_SIZE/2);
-            for (size_t i=0;i<mono.size();++i) mono[i] = (input_chunk[i*2]+input_chunk[i*2+1])*0.5f;
+            mono.clear(); // Reset without deallocating
+            for (size_t i=0; i < WORK_SIZE/2; ++i) {
+                mono.push_back((input_chunk[i*2] + input_chunk[i*2+1]) * 0.5f);
+            }
 
             // Denoise (RNNoise)
             denoiser.Process(mono);
@@ -135,7 +143,7 @@ void processing_thread_func() {
                 // A. Resample 48k -> 40k (Send clean mono to Python)
                 auto audio_40k = Resample48To40(burst_buffer);
 
-                // B. Async Python Call
+                // B. Async Python Call (Kept for Spinner Animation)
                 auto future_result = std::async(std::launch::async, [&]() {
                     return g_bridge.ProcessAudio(audio_40k, static_cast<int>(g_config.pitch_shift_semitones));
                 });
@@ -218,7 +226,28 @@ int main() {
             continue;
         }
 
-        if (input == 0) break;
+        if (input == 0) {
+            std::cout << "\n----------------------------------------\n";
+            std::cout << "               TODO LIST                \n";
+            std::cout << "----------------------------------------\n";
+
+            // Try to open 'todo.txt' in current directory
+            std::ifstream file("todo.txt");
+            if (!file.is_open()) {
+                // If failed, try one directory up (useful for cmake-build-debug)
+                file.open("../todo.txt");
+            }
+
+            if (file.is_open()) {
+                std::cout << file.rdbuf() << std::endl;
+            } else {
+                std::cout << "[ERROR] Could not find 'todo.txt' in current or parent directory." << std::endl;
+                std::cout << "Make sure you created the file!" << std::endl;
+            }
+            std::cout << "----------------------------------------\n";
+            std::cout << "Exiting..." << std::endl;
+            break;
+        }
 
         if (input == -1) {
             g_is_replaying = true;

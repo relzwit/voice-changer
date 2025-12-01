@@ -1,0 +1,2 @@
+- swap to RMVPE from Torchcrepe
+- DONE ---- swap to torchaudio from scipy
