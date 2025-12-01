@@ -2,4 +2,3 @@
 - find a more fitting model
 - install a RMVPE version that can use both CPU and GPU
 - actually use the config.ini file
-- get chatgpt to fix the issues with male voice instead of female
