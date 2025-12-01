@@ -5,42 +5,24 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 
-#define PORT 51235 // // Port must match server.py exactly.
+#define PORT 51235
 
 PythonBridge::PythonBridge() {}
-
-PythonBridge::~PythonBridge() {
-    Disconnect(); // // Ensure we close the socket on destruction.
-}
+PythonBridge::~PythonBridge() { Disconnect(); }
 
 void PythonBridge::Disconnect() {
     if (connected) {
-        std::cout << "[BRIDGE DEBUG] Disconnecting socket." << std::endl;
         close(sock);
         connected = false;
     }
 }
 
 bool PythonBridge::Connect() {
-    // // Create a TCP socket.
-    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        std::cerr << "[BRIDGE] Socket creation error" << std::endl;
-        return false;
-    }
-
+    if ((sock = socket(AF_INET, SOCK_STREAM, 0)) < 0) return false;
     serv_addr.sin_family = AF_INET;
     serv_addr.sin_port = htons(PORT);
-
-    // // Set localhost IP.
-    if (inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr) <= 0) {
-        std::cerr << "[BRIDGE] Invalid address" << std::endl;
-        return false;
-    }
-
-    // // Attempt connection.
-    if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) {
-        return false;
-    }
+    if (inet_pton(AF_INET, "127.0.0.1", &serv_addr.sin_addr) <= 0) return false;
+    if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) return false;
 
     std::cout << "[BRIDGE] Connected to Python AI backend!" << std::endl;
     connected = true;
@@ -48,61 +30,40 @@ bool PythonBridge::Connect() {
 }
 
 std::vector<float> PythonBridge::ProcessAudio(const std::vector<float>& input, int pitch_semitones) {
-    if (!connected) {
-        std::cerr << "[BRIDGE] Not connected to server." << std::endl;
-        return {};
-    }
+    if (!connected) return {};
 
-    // --- 1. PREPARE HEADER ---
-    // // Create a struct to hold the metadata.
-    struct {
-        int32_t sample_count;
-        int32_t pitch;
-    } header;
-
-    header.sample_count = static_cast<int32_t>(input.size());
+    // // 1. Send Header (8 bytes: Size + Pitch)
+    struct { int32_t size; int32_t pitch; } header;
+    header.size = static_cast<int32_t>(input.size());
     header.pitch = static_cast<int32_t>(pitch_semitones);
 
-    // --- 2. SEND HEADER ---
-    // // Send the 8-byte header first.
     if (send(sock, &header, sizeof(header), 0) < 0) {
-        std::cerr << "[BRIDGE] Send Header Failed" << std::endl;
-        Disconnect();
-        return {};
+        Disconnect(); return {};
     }
 
-    // --- 3. SEND AUDIO ---
-    // // Send the raw float array.
+    // // 2. Send Audio
     if (send(sock, input.data(), input.size() * sizeof(float), 0) < 0) {
-        std::cerr << "[BRIDGE] Send Audio Failed" << std::endl;
-        Disconnect();
-        return {};
+        Disconnect(); return {};
     }
 
-    // --- 4. RECEIVE SIZE ---
-    // // Wait for Python to tell us how big the result is.
-    int32_t response_size = 0;
-    int valread = read(sock, &response_size, 4);
-    if (valread <= 0) {
-        std::cerr << "[BRIDGE] Read Size Failed" << std::endl;
-        Disconnect();
-        return {};
+    // // 3. Receive Size
+    int32_t resp_size = 0;
+    if (read(sock, &resp_size, 4) <= 0) {
+        Disconnect(); return {};
     }
 
-    if (response_size == 0) return {}; // // Server sent empty (error).
+    if (resp_size == 0) return {};
 
-    // --- 5. RECEIVE AUDIO ---
-    // // Create a vector to hold the result.
-    std::vector<float> output(response_size);
-    size_t total_read = 0;
-    size_t bytes_to_read = static_cast<size_t>(response_size) * sizeof(float);
-    char* ptr = reinterpret_cast<char*>(output.data());
+    // // 4. Receive Audio
+    std::vector<float> output(resp_size);
+    size_t total = 0;
+    size_t bytes = resp_size * sizeof(float);
+    char* ptr = (char*)output.data();
 
-    // // Loop to ensure we get every single byte.
-    while (total_read < bytes_to_read) {
-        int r = read(sock, ptr + total_read, bytes_to_read - total_read);
+    while (total < bytes) {
+        int r = read(sock, ptr + total, bytes - total);
         if (r <= 0) break;
-        total_read += static_cast<size_t>(r);
+        total += r;
     }
 
     return output;
