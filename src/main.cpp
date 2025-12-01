@@ -1,6 +1,7 @@
 // /src/main.cpp
 
 #include <iostream>
+#include <cstdlib>
 #include <vector>
 #include <thread>
 #include <atomic>
@@ -274,6 +275,15 @@ void processing_thread_func() {
 }
 
 int main() {
+
+    int result = std::system("kitty --detach bash /home/relz/code/voice-changer/src/server/start_server.sh &");  // '&' runs in background
+
+    if(result != 0) {
+        std::cerr << "Failed to start the server script!" << std::endl;
+        return 1;
+    }
+
+    std::cout << "Server script started successfully!" << std::endl;
     // Load configuration from config.ini BEFORE initializing anything
     load_config(g_config.pitch_shift_semitones, g_config.recording_duration);
 
