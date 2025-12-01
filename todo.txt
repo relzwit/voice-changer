@@ -1,4 +1,4 @@
 - swap to RMVPE from Torchcrepe
 - find a more fitting model
 - install a RMVPE version that can use both CPU and GPU
-- actually use the config.ini file
+- config main.cpp to read the config.ini settings for hardware and such

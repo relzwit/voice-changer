@@ -11,28 +11,33 @@ import traceback
 import time
 import faiss
 import torchcrepe
+import configparser # <-- NEW: For reading config.ini
 
-# --- CONFIG ---
-HOST = '127.0.0.1'
-PORT = 51235
-MODEL_PATH = "models/voice.onnx"
-HUBERT_PATH = "models/hubert.onnx"
-INDEX_PATH = "models/voice.index"
-INDEX_RATE = 0.75
+# --- CONFIG LOADING ---
+config = configparser.ConfigParser()
+config.read('config.ini')
 
-# FIXED: Model is trained at 40kHz
-MODEL_SAMPLE_RATE = 40000
+# Safely cast all config values
+HOST = config['NETWORK'].get('HOST', '127.0.0.1')
+PORT = config['NETWORK'].getint('PORT', 51235)
+MODEL_PATH = config['PATHS'].get('MODEL_PATH', 'models/voice.onnx')
+HUBERT_PATH = config['PATHS'].get('HUBERT_PATH', 'models/hubert.onnx')
+INDEX_PATH = config['PATHS'].get('INDEX_PATH', 'models/voice.index')
+INDEX_RATE = config['MODEL_TUNING'].getfloat('INDEX_RATE', 0.75)
+MODEL_SAMPLE_RATE = config['MODEL_TUNING'].getint('MODEL_SAMPLE_RATE', 40000)
+
+# Fixed settings for the client/analysis loop
 TARGET_SAMPLE_RATE = 48000
 INPUT_SR = 48000
+# ----------------------
 
 print("="*60)
 print("VOICE CHANGER SERVER - DEBUG MODE")
 print("="*60)
 print(f"Python Version: {sys.version}")
-print(f"PyTorch Version: {torch.__version__}")
 print(f"MODEL_SAMPLE_RATE: {MODEL_SAMPLE_RATE}")
 print(f"TARGET_SAMPLE_RATE: {TARGET_SAMPLE_RATE}")
-print(f"INPUT_SR: {INPUT_SR}")
+print(f"INDEX_RATE: {INDEX_RATE}")
 print("="*60)
 print("Loading Models...")
 
@@ -82,7 +87,7 @@ try:
     analysis_resampler = torchaudio.transforms.Resample(INPUT_SR, 16000)
     print(f"[DEBUG] Analysis Resampler: {INPUT_SR} Hz -> 16000 Hz")
 
-    # Output resampler: 40k -> 48k (for C++ playback)
+    # Output resampler: MODEL_SR -> 48k (for C++ playback)
     output_resampler = torchaudio.transforms.Resample(MODEL_SAMPLE_RATE, TARGET_SAMPLE_RATE)
     print(f"[DEBUG] Output Resampler: {MODEL_SAMPLE_RATE} Hz -> {TARGET_SAMPLE_RATE} Hz")
 
@@ -170,7 +175,7 @@ def process_audio(data, pitch_shift):
                 model='tiny',
                 batch_size=256,
                 device='cpu',
-                decoder=torchcrepe.decode.weighted_argmax
+                decoder=torchcrepe.decode.viterbi
             )
             f0 = f0.squeeze(0).numpy()
             print(f"[DEBUG] CREPE output: {f0.shape}")
@@ -193,14 +198,20 @@ def process_audio(data, pitch_shift):
         # PITCH SHIFTING
         f0 = np.asarray(f0, dtype=np.float32)
         factor = 2 ** (pitch_shift / 12.0)
-        f0 *= factor
 
         voiced = f0 > 0
+
+        # Apply shift only to voiced segments
+        f0[voiced] *= factor
+
         if np.any(voiced):
             print(f"[DEBUG] Shifted pitch: {np.mean(f0[voiced]):.1f} Hz (factor={factor:.3f})")
 
         # COARSE PITCH
         pitch_coarse = f0_to_coarse(f0)
+
+        # Ensure unvoiced segments are mapped to the 0/silence bucket
+        pitch_coarse[~voiced] = 0
 
         inputs = {
             "feats": embed,
@@ -210,7 +221,7 @@ def process_audio(data, pitch_shift):
             "sid": np.array([0], dtype=np.int64)
         }
 
-        # RUN VOICE MODEL (outputs at 40kHz)
+        # RUN VOICE MODEL (outputs at MODEL_SR)
         print("[DEBUG] Running Voice Model...")
         out = voice_sess.run(["audio"], inputs)[0]
         out = np.squeeze(out).astype(np.float32)
@@ -218,9 +229,9 @@ def process_audio(data, pitch_shift):
         if out.ndim > 1:
             out = out.reshape(-1)
 
-        print(f"[DEBUG] Model output: {len(out)} samples at 40kHz = {len(out)/MODEL_SAMPLE_RATE:.2f}s")
+        print(f"[DEBUG] Model output: {len(out)} samples at {MODEL_SAMPLE_RATE} Hz")
 
-        # RESAMPLE 40k -> 48k for playback
+        # RESAMPLE MODEL_SR -> 48k for playback
         print(f"[DEBUG] Resampling to 48kHz...")
         out_tensor = torch.from_numpy(out)
         out_tensor = output_resampler(out_tensor)

@@ -13,6 +13,7 @@
 #include <future>
 #include <fstream>
 #include <string>
+#include <sstream> // For parsing strings
 
 #define MINIAUDIO_IMPLEMENTATION
 #include <miniaudio.h>
@@ -20,10 +21,48 @@
 #include "Utils.h"
 #include "PythonBridge.h"
 
+// --- CONFIGURATION MANAGEMENT ---
+// This simple function reads key/value pairs from the INI file
+void load_config(float& pitch_shift, float& duration) {
+    std::ifstream file("config.ini");
+    if (!file.is_open()) {
+        std::cerr << "[WARN] config.ini not found. Using defaults." << std::endl;
+        return;
+    }
+
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.empty() || line[0] == '[' || line[0] == ';') continue;
+
+        std::size_t equalPos = line.find('=');
+        if (equalPos == std::string::npos) continue;
+
+        std::string key = line.substr(0, equalPos);
+        std::string value = line.substr(equalPos + 1);
+
+        // Simple trim (basic implementation)
+        key.erase(0, key.find_first_not_of(" \t"));
+        key.erase(key.find_last_not_of(" \t") + 1);
+        value.erase(0, value.find_first_not_of(" \t"));
+        value.erase(value.find_last_not_of(" \t") + 1);
+
+        if (key == "PITCH_SHIFT_SEMITONES") {
+            try {
+                pitch_shift = std::stof(value);
+            } catch (...) { std::cerr << "[WARN] Invalid PITCH_SHIFT value in config." << std::endl; }
+        } else if (key == "RECORDING_DURATION_SECONDS") {
+            try {
+                duration = std::stof(value);
+            } catch (...) { std::cerr << "[WARN] Invalid DURATION value in config." << std::endl; }
+        }
+    }
+}
+// --- END CONFIGURATION MANAGEMENT ---
+
 // --- SETTINGS ---
 struct AppConfig {
-    float pitch_shift_semitones = 12.0f;
-    float recording_duration = 5.0f;
+    float pitch_shift_semitones = 12.0f; // Default if config fails
+    float recording_duration = 5.0f;     // Default if config fails
 } g_config;
 
 // --- STATE ---
@@ -141,6 +180,7 @@ void processing_thread_func() {
                     for (float &s : burst_buffer) s *= normalization_factor;
                 }
 
+                // --- DEBUG MONITOR: PLAY RAW AUDIO BEFORE SENDING (Removed for simplicity, keep just log) ---
                 std::cout << "\n[PROCESSING] Sending " << burst_buffer.size() << " samples to AI..." << std::flush;
 
                 auto future_result = std::async(std::launch::async, [&]() {
@@ -156,7 +196,6 @@ void processing_thread_func() {
                 auto processed = future_result.get();
 
                 if (!processed.empty()) {
-                    // CRITICAL FIX: Don't stretch the audio!
                     // Python already resampled to 48kHz, so just convert mono->stereo
                     std::vector<float> stereo;
                     stereo.reserve(processed.size()*2);
@@ -164,9 +203,6 @@ void processing_thread_func() {
                         stereo.push_back(s);
                         stereo.push_back(s);
                     }
-
-                    std::cout << "\n[DEBUG] Received " << processed.size() << " samples from Python" << std::endl;
-                    std::cout << "[DEBUG] Duration: " << (float)processed.size() / 48000.0f << "s at 48kHz" << std::endl;
 
                     g_last_recording = stereo;
                     g_rb_output.Write(stereo.data(), stereo.size());
@@ -186,9 +222,13 @@ void processing_thread_func() {
 }
 
 int main() {
+    // Load configuration from config.ini BEFORE initializing anything
+    load_config(g_config.pitch_shift_semitones, g_config.recording_duration);
+
     std::cout << "========================================\n";
     std::cout << "      RVC VOICE CHANGER - C++ CLIENT    \n";
     std::cout << "========================================\n";
+    std::cout << "[INFO] Shift loaded: " << g_config.pitch_shift_semitones << " semitones." << std::endl;
 
     while (!g_bridge.Connect()) {
         std::cout << "Waiting for 'server.py'..." << std::endl;
@@ -214,13 +254,18 @@ int main() {
 
     while (true) {
         std::cout << "\n----------------------------------------\n";
-        std::cout << "### enter recording length (seconds) (0 to Quit): ";
+        std::cout << "### enter recording length (s) (-1 to replay, 0 to Quit): ";
         float input;
         if (!(std::cin >> input)) { std::cin.clear(); std::cin.ignore(10000, '\n'); continue; }
 
         if (input == 0) break;
         if (input == -1) { g_is_replaying = true; g_is_processing = true; }
-        else { g_config.recording_duration = input; g_is_recording = true; }
+        else {
+            // In a real app, you would ask for duration or check config here.
+            // For now, we take user input, but rely on loaded duration if no input is given.
+            g_config.recording_duration = input;
+            g_is_recording = true;
+        }
 
         while (g_is_recording || g_is_processing) std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
