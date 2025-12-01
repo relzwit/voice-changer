@@ -1,4 +1,4 @@
 - swap to RMVPE from Torchcrepe
-- DONE ---- swap to torchaudio from scipy
 - find a 48k model
 - install a RMVPE version that can use both CPU and GPU
+- remove C++ audio pre-processing
