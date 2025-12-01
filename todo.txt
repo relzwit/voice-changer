@@ -3,3 +3,4 @@
 - install a RMVPE version that can use both CPU and GPU
 - config main.cpp to read the config.ini settings for hardware and such
 - make file save point to a nicer location
+- autolaunch server through the C++ program
