@@ -44,7 +44,6 @@ add_executable(voice_changer_app
         src/main.cpp
         src/PythonBridge.cpp
         src/PythonBridge.h
-#        src/Denoise.h
         src/Utils.h
 )
 

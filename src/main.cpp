@@ -25,9 +25,10 @@
 
 // --- CONFIGURATION MANAGEMENT ---
 void load_config(float& pitch_shift, float& duration) {
+   // cpp not currently reading the file
     std::ifstream file("config.ini");
     if (!file.is_open()) {
-        std::cerr << "[WARN] config.ini not found. Using defaults." << std::endl;
+        // std::cerr << "[WARN] config.ini not found. Using defaults." << std::endl;
         return;
     }
 
@@ -169,6 +170,28 @@ void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
     }
 }
 
+// --- PYTHON SERVER THREAD ---
+// Function to launch the Python server script in a new process.
+// This will block the thread it runs in until the script is terminated.
+void run_python_server_async() {
+    // Retain server output
+    const char* server_command = "bash /home/relz/code/voice-changer/src/server/start_server.sh";
+
+    std::cout << "[Client] Starting Python server" << "\n";
+
+    // system() executes the command and blocks until the command completes.
+    int result = std::system(server_command);
+
+    // This part is reached only when the Python server script exits
+    if (g_running) {
+        std::cerr << "[Client] Python server terminated unexpectedly with status: " << result << std::endl;
+    } else {
+        std::cout << "[Client] Python server terminated gracefully." << std::endl;
+    }
+}
+// --- END PYTHON SERVER THREAD ---
+
+
 // --- WORKER THREAD ---
 void processing_thread_func() {
     std::vector<float> burst_buffer;
@@ -188,7 +211,7 @@ void processing_thread_func() {
                     std::cout << "\r[REPLAYING]..." << std::flush;
                     g_rb_output.Write(g_last_recording.data(), g_last_recording.size());
                 } else {
-                    std::cout << "\r[ERROR] No recording." << std::endl;
+                    std::cout << "\r[Client] No recording." << std::endl;
                 }
                 g_is_replaying = false;
                 g_is_processing = false;
@@ -234,20 +257,26 @@ void processing_thread_func() {
                 }
 
                 // --- DEBUG MONITOR ---
-                std::cout << "\n[PROCESSING] Sending " << burst_buffer.size() << " samples to AI..." << std::flush;
+
+                // Remove leading newline from processing_msg definition
+                std::string processing_msg = "[PROCESSING] Sending " + std::to_string(burst_buffer.size()) + " samples to AI...";
+                std::cout << "\n" << processing_msg << std::flush; // Print base message with single newline before it
 
                 auto future_result = std::async(std::launch::async, [&]() {
                     return g_bridge.ProcessAudio(burst_buffer, static_cast<int>(g_config.pitch_shift_semitones));
                 });
 
+                // Spinning Cursor during processing - uses \r to stay on the same line
                 const char spinner[] = {'|','/','-','\\'};
                 int spin_idx = 0;
                 while (future_result.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready) {
-                    std::cout << "\r[PROCESSING] " << spinner[spin_idx] << std::flush;
+                    // Overwrite the entire line to prevent output clutter
+                    std::cout << "\r" << processing_msg << " " << spinner[spin_idx] << std::flush;
                     spin_idx = (spin_idx + 1) % 4;
                 }
                 auto processed = future_result.get();
 
+                // Clear spinner line and print final status
                 if (!processed.empty()) {
                     // Python already resampled to 48kHz, so just convert mono->stereo
                     std::vector<float> stereo;
@@ -259,8 +288,11 @@ void processing_thread_func() {
 
                     g_last_recording = stereo;
                     g_rb_output.Write(stereo.data(), stereo.size());
-                    std::cout << "\r[PLAYING AI RESULT]     " << std::endl;
+                    // Final output uses \r to overwrite the spinner and prints DONE.
+                    std::cout << "\r" << processing_msg << " [DONE] " << std::endl;
+                    std::cout << "[PLAYING AI RESULT]     " << std::endl;
                 } else {
+                    std::cout << "\r" << processing_msg << " [ERROR] " << std::endl;
                     std::cout << "\r[PYTHON ERROR]     " << std::endl;
                 }
 
@@ -275,27 +307,35 @@ void processing_thread_func() {
 }
 
 int main() {
-
-    int result = std::system("kitty --detach bash /home/relz/code/voice-changer/src/server/start_server.sh &");  // '&' runs in background
-
-    if(result != 0) {
-        std::cerr << "Failed to start the server script!" << std::endl;
-        return 1;
-    }
-
-    std::cout << "Server script started successfully!" << std::endl;
     // Load configuration from config.ini BEFORE initializing anything
     load_config(g_config.pitch_shift_semitones, g_config.recording_duration);
 
     std::cout << "========================================\n";
     std::cout << "      RVC VOICE CHANGER - C++ CLIENT    \n";
     std::cout << "========================================\n";
-    std::cout << "[INFO] Shift loaded: " << g_config.pitch_shift_semitones << " semitones." << std::endl;
+    std::cout << "[Client] Shift loaded: " << g_config.pitch_shift_semitones << " semitones." << std::endl;
 
+    // --- Start Python Server in a separate thread ---
+    std::thread server_startup_thread(run_python_server_async);
+    // ----------------------------------------------------
+
+    // Block until the Python bridge connects, giving the server time to start
+    const char spinner[] = {'|','/','-','\\'};
+    int spin_idx = 0;
+    const std::string connect_msg = "Waiting for 'server.py'...";
+
+    // Spinning cursor during connection wait - uses \r to stay on the same line
     while (!g_bridge.Connect()) {
-        std::cout << "Waiting for 'server.py'..." << std::endl;
-        std::this_thread::sleep_for(std::chrono::seconds(2));
+        // Clear the line and print the message + spinner. This is susceptible to
+        // intermingling with server output.
+        std::cout << "\r" << connect_msg << " " << spinner[spin_idx] << std::flush;
+        spin_idx = (spin_idx + 1) % 4;
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
+
+    // Clear the last spinner line before printing success message
+    std::cout << "\r" << std::string(connect_msg.length() + 5, ' ') << "\r" << std::flush;
+    std::cout << "[SUCCESS] Python Bridge Connected.\n";
 
     g_rb_input.Init(48000 * 30 * INTERNAL_CHANNELS);
     g_rb_output.Init(48000 * 30 * INTERNAL_CHANNELS);
@@ -332,16 +372,26 @@ int main() {
                 std::cout << "[ERROR] No audio clip to save. Record something first." << std::endl;
                 continue;
             }
-            // Generate unique filename based on timestamp
-            std::time_t t = std::time(nullptr);
-            std::tm tm = *std::localtime(&t);
-            std::ostringstream oss;
-            oss << "output_" << std::put_time(&tm, "%Y%m%d_%H%M%S") << ".wav";
-            std::string filename = oss.str();
+
+            // Prompt user for filename
+            std::string user_filename;
+            std::cout << "Enter filename (without extension): ";
+            if (!std::getline(std::cin, user_filename) || user_filename.empty()) {
+                std::cout << "[WARN] Empty filename. Using default timestamped name." << std::endl;
+                std::time_t t = std::time(nullptr);
+                std::tm tm = *std::localtime(&t);
+                std::ostringstream oss;
+                oss << "output_" << std::put_time(&tm, "%Y%m%d_%H%M%S");
+                user_filename = oss.str();
+            }
+
+            // Ensure the directory exists
+            std::string dir = "/home/relz/code/voice-changer/saved_outputs";
+            std::string full_path = dir + "/" + user_filename + ".wav";
 
             // g_last_recording is Stereo (2 channels)
-            if (SaveWavFile(g_last_recording, filename, 2, INTERNAL_SAMPLE_RATE)) {
-                std::cout << "[SUCCESS] Saved to " << filename << std::endl;
+            if (SaveWavFile(g_last_recording, full_path, 2, INTERNAL_SAMPLE_RATE)) {
+                std::cout << "[SUCCESS] Saved to " << full_path << std::endl;
             } else {
                 std::cout << "[ERROR] Failed to save file." << std::endl;
             }
@@ -374,9 +424,25 @@ int main() {
         }
     }
 
-    g_running = false;
-    ai_thread.join();
-    ma_device_uninit(&device);
+    // --- CLEANUP ---
+    std::cout << "[Client] Initiating graceful shutdown..." << std::endl;
+    g_running = false; // Signal all internal threads to stop
+    ai_thread.join();  // Wait for the audio processing thread to finish
+
+    // 1. Disconnect the socket. This closes the client side of the TCP connection,
+    // which should trigger the Python server to detect disconnection and exit.
     g_bridge.Disconnect();
+
+    // 2. Wait briefly (500ms) for the Python process to execute the exit command after disconnection.
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    // 3. Block until the thread that ran the server command completes (i.e., the server process has exited).
+    std::cout << "[Client] Waiting for Python server thread to join..." << std::flush;
+    server_startup_thread.join();
+    std::cout << " [DONE]" << std::endl;
+    // ---------------
+
+    ma_device_uninit(&device);
+    std::cout << "[Client] Shutdown complete. Exiting." << std::endl;
     return 0;
 }

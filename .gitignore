@@ -6,3 +6,5 @@ models/*
 
 # files are too big
 venv/
+
+/home/relz/code/voice-changer/vcpkg
