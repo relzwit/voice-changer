@@ -57,6 +57,10 @@ target_include_directories(voice_changer_app PRIVATE
         src  # Allows us to write #include "Utils.h" instead of #include "src/Utils.h"
 )
 
+target_include_directories(voice_changer_app
+        PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/indicators
+)
 # --- LINKING ---
 
 # This tells the Linker: "Bind the compiled RNNoise binary code into our executable."

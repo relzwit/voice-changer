@@ -29,7 +29,6 @@ bool PythonBridge::Connect() {
 
     if (connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0) return false;
 
-    std::cout << "[BRIDGE] Connected to Python AI backend!" << std::endl;
     connected = true;
     return true;
 }

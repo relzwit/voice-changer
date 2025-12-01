@@ -10,3 +10,9 @@ Now I am starving. havent eaten all day. and my laundry has been finished and si
 9 hours at this point? Might have to re-wash lmao...
 
 Looking at the commits, i achieved the Minimal Viable Product 18 hours ago......wtf am i doing with my life?
+
+------
+
+Used for loading bars:
+
+https://github.com/p-ranav/indicators?tab=readme-ov-file
