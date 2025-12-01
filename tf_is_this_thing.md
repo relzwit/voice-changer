@@ -8,13 +8,15 @@ This is why I made the AI comment so heavily.
 
 Here is the AI explanation of the project:
 
-he Architecture: "The Factory & The Lab"
+ystem Architecture
 
-Think of this program as two distinct buildings connected by a pneumatic tube (the Network Socket).
+The Concept: "The Factory & The Lab"
 
-    The Factory (C++): This is where the heavy lifting happens. It handles the raw materials (audio bytes) coming in and the finished product going out. It is built for speed and safety. It never stops moving.
+Think of this program as two distinct buildings connected by a pneumatic tube (the TCP Network Socket).
 
-    The Lab (Python): This is where the magic happens. It is slower, but it is "smart." It takes a chunk of audio, studies it, reconstructs it, and sends it back.
+    🏭 The Factory (C++): This is where the heavy lifting happens. It handles the raw materials (audio bytes) coming in and the finished product going out. It is built for speed and safety. It never stops moving.
+
+    🧪 The Lab (Python): This is where the magic happens. It is slower, but it is "smart." It takes a chunk of audio, studies it, reconstructs it, and sends it back.
 
 Phase 1: Initialization (The Setup)
 
@@ -32,7 +34,7 @@ Before you say a word, the system prepares the pipeline.
 
         It initializes miniaudio. This library talks to your OS (Windows/Linux) and grabs exclusive access to the microphone and speakers.
 
-        It creates two Ring Buffers (more on these later).
+        It creates two Ring Buffers (circular queues for thread-safe data transfer).
 
         It spawns a Worker Thread (processing_thread_func). This is a background worker who will do all the data moving so the main window doesn't freeze.
 
@@ -40,7 +42,7 @@ Before you say a word, the system prepares the pipeline.
 
 Phase 2: The Capture (The Factory Floor)
 
-You press "5" and hit Enter. g_is_recording becomes true.
+Action: You press 5 and hit Enter. g_is_recording becomes true.
 
 A. The Hardware Interrupt (data_callback)
 
@@ -51,6 +53,10 @@ Every few milliseconds (specifically every 4096 samples), your sound card interr
     It takes the raw floats from the mic and writes them into the g_rb_input (Input Ring Buffer).
 
     It looks at g_rb_output (Output Ring Buffer) to see if there is anything to play. If yes, it sends it to the speakers.
+
+Shutterstock
+
+    Explore
 
 B. The Worker Thread (processing_thread_func)
 
@@ -134,46 +140,51 @@ The AI generates audio at 40kHz. We need 48kHz to match the C++ system.
 
 Phase 5: The Playback (Shipping Out)
 
-    Receipt:
+1. Receipt
 
-        Python sends the new audio bytes back over the socket.
+Python sends the new audio bytes back over the socket. The C++ PythonBridge receives them and converts them back into a std::vector<float>.
 
-        C++ PythonBridge receives them and converts them back into a std::vector<float>.
+2. Elastic Resampling (Crucial Step)
 
-    Elastic Resampling (Crucial Step):
+    The Problem: Audio clocks are imperfect. You sent exactly 240,000 samples. Python might send back 240,005 samples due to rounding errors. If we just played that, the audio would drift over time.
 
-        The Problem: Audio clocks are imperfect. You sent exactly 240,000 samples. Python might send back 240,005 samples due to rounding errors. If we just played that, the audio would drift over time.
+    The Solution: ResampleToCount. We force the received audio to be exactly the same length as the input buffer. If it's too long, we squash it slightly. If it's too short, we stretch it.
 
-        The Solution: ResampleToCount. We force the received audio to be exactly the same length as the input buffer. If it's too long, we squash it slightly. If it's too short, we stretch it.
+3. To the Speakers
 
-    To the Speakers:
+The Worker Thread converts the Mono AI audio into Stereo (copying Left to Right). It writes this data into g_rb_output (The Output Ring Buffer).
 
-        The Worker Thread converts the Mono AI audio into Stereo (copying Left to Right).
+4. The Final Callback
 
-        It writes this data into g_rb_output (The Output Ring Buffer).
-
-    The Final Callback:
-
-        The next time the hardware interrupts (data_callback), it sees data in the Output Ring Buffer.
-
-        It grabs it and pushes it to your speakers/headphones.
+The next time the hardware interrupts (data_callback), it sees data in the Output Ring Buffer. It grabs it and pushes it to your speakers/headphones.
 
 Summary of Data Flow
 
-    Mic (48kHz) → Callback → Input RingBuffer
+Code snippet
 
-    Worker Thread → Denoise → Accumulate 5s
-
-    Resample (40kHz) → TCP Send
-
-    Python → Hubert (Extract Words) → Crepe (Extract Pitch) → Pitch Shift
-
-    RVC Model (Combine Words + New Pitch) → New Voice
-
-    Resample (48kHz) → TCP Return
-
-    C++ Worker → Elastic Fit → Output RingBuffer
-
-    Callback → Speakers
-
-That is exactly how your project works. It is a sophisticated pipeline that balances the raw speed of C++ with the complex intelligence of Python.
+graph TD
+    A[Mic 48kHz] --> B[Callback]
+    B --> C[Input RingBuffer]
+    C --> D[Worker Thread]
+    D --> E[Denoise]
+    E --> F[Accumulate 5s]
+    F --> G[Resample 40kHz]
+    G --> H[TCP Send]
+    H --> I[Python Lab]
+    
+    subgraph Python
+    I --> J[Hubert: Extract Words]
+    I --> K[Crepe: Extract Pitch]
+    K --> L[Pitch Shift]
+    J --> M[RVC Model]
+    L --> M
+    M --> N[New Voice]
+    N --> O[Resample 48kHz]
+    end
+    
+    O --> P[TCP Return]
+    P --> Q[C++ Worker]
+    Q --> R[Elastic Fit]
+    R --> S[Output RingBuffer]
+    S --> T[Callback]
+    T --> U[Speakers]
