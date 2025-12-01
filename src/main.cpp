@@ -18,13 +18,10 @@
 #include <miniaudio.h>
 
 #include "Utils.h"
-// REMOVED: #include "Denoise.h" <--- DELETED
 #include "PythonBridge.h"
 
 // --- SETTINGS ---
 struct AppConfig {
-    // CHANGED: 12.0f -> 0.0f
-    // Crepe is already doubling our octave detection, so we don't need to shift further.
     float pitch_shift_semitones = 12.0f;
     float recording_duration = 5.0f;
 } g_config;
@@ -82,8 +79,6 @@ void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
 
 // --- WORKER THREAD ---
 void processing_thread_func() {
-    // REMOVED: DenoiseEngine denoiser; <--- DELETED
-
     std::vector<float> burst_buffer;
     burst_buffer.reserve(48000 * 60);
 
@@ -113,15 +108,11 @@ void processing_thread_func() {
                 continue;
             }
 
-            // Processing: Convert Stereo to Mono
-            // We still need to do this because the AI expects Mono input.
+            // Convert Stereo to Mono
             mono.clear();
             for (size_t i=0; i < WORK_SIZE/2; ++i) {
                 mono.push_back((input_chunk[i*2] + input_chunk[i*2+1]) * 0.5f);
             }
-
-            // REMOVED: denoiser.Process(mono); <--- DELETED
-            // We now insert the raw, untreated mono audio directly.
 
             burst_buffer.insert(burst_buffer.end(), mono.begin(), mono.end());
 
@@ -150,19 +141,7 @@ void processing_thread_func() {
                     for (float &s : burst_buffer) s *= normalization_factor;
                 }
 
-                // --- DEBUG MONITOR: PLAY RAW AUDIO BEFORE SENDING ---
-                std::cout << "\n[DEBUG] Playing captured audio for verification..." << std::endl;
-                std::vector<float> debug_stereo;
-                debug_stereo.reserve(burst_buffer.size() * 2);
-                for(float s : burst_buffer) { debug_stereo.push_back(s); debug_stereo.push_back(s); }
-
-                g_rb_output.Write(debug_stereo.data(), debug_stereo.size());
-
-                float play_time = (float)burst_buffer.size() / 48000.0f;
-                std::this_thread::sleep_for(std::chrono::milliseconds((int)(play_time * 1000) + 500));
-                // ----------------------------------------------------
-
-                std::cout << "[PROCESSING] Sending " << burst_buffer.size() << " samples to AI..." << std::flush;
+                std::cout << "\n[PROCESSING] Sending " << burst_buffer.size() << " samples to AI..." << std::flush;
 
                 auto future_result = std::async(std::launch::async, [&]() {
                     return g_bridge.ProcessAudio(burst_buffer, static_cast<int>(g_config.pitch_shift_semitones));
@@ -177,10 +156,17 @@ void processing_thread_func() {
                 auto processed = future_result.get();
 
                 if (!processed.empty()) {
-                    auto output = ResampleToCount(processed, burst_buffer.size());
+                    // CRITICAL FIX: Don't stretch the audio!
+                    // Python already resampled to 48kHz, so just convert mono->stereo
                     std::vector<float> stereo;
-                    stereo.reserve(output.size()*2);
-                    for (float s : output) { stereo.push_back(s); stereo.push_back(s); }
+                    stereo.reserve(processed.size()*2);
+                    for (float s : processed) {
+                        stereo.push_back(s);
+                        stereo.push_back(s);
+                    }
+
+                    std::cout << "\n[DEBUG] Received " << processed.size() << " samples from Python" << std::endl;
+                    std::cout << "[DEBUG] Duration: " << (float)processed.size() / 48000.0f << "s at 48kHz" << std::endl;
 
                     g_last_recording = stereo;
                     g_rb_output.Write(stereo.data(), stereo.size());

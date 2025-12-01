@@ -20,35 +20,49 @@ HUBERT_PATH = "models/hubert.onnx"
 INDEX_PATH = "models/voice.index"
 INDEX_RATE = 0.75
 
-# CHANGED: Switch from 40000 to 48000
-MODEL_SAMPLE_RATE = 48000  # <--- THIS IS THE FIX
+# FIXED: Model is trained at 40kHz
+MODEL_SAMPLE_RATE = 40000
 TARGET_SAMPLE_RATE = 48000
 INPUT_SR = 48000
 
+print("="*60)
+print("VOICE CHANGER SERVER - DEBUG MODE")
+print("="*60)
 print(f"Python Version: {sys.version}")
+print(f"PyTorch Version: {torch.__version__}")
+print(f"MODEL_SAMPLE_RATE: {MODEL_SAMPLE_RATE}")
+print(f"TARGET_SAMPLE_RATE: {TARGET_SAMPLE_RATE}")
+print(f"INPUT_SR: {INPUT_SR}")
+print("="*60)
 print("Loading Models...")
 
 # --- LOAD FAISS INDEX ---
 index = None
 try:
-    print(f"Attempting to load index: {INDEX_PATH}")
+    print(f"[DEBUG] Attempting to load index: {INDEX_PATH}")
     index = faiss.read_index(INDEX_PATH)
     if hasattr(index, 'make_direct_map'):
         index.make_direct_map()
-    print(f"Index Loaded Successfully. Total Vectors: {index.ntotal}")
+    print(f"[DEBUG] Index Loaded Successfully. Total Vectors: {index.ntotal}")
 except Exception as e:
     print(f"[WARN] Could not load Index file: {e}")
 
 # --- LOAD AI MODELS ---
 try:
+    print("[DEBUG] Creating ONNX Runtime Session Options...")
     opts = ort.SessionOptions()
     opts.intra_op_num_threads = 4
     opts.log_severity_level = 3
+    print(f"[DEBUG] Threads: {opts.intra_op_num_threads}")
 
+    print(f"[DEBUG] Loading HuBERT from: {HUBERT_PATH}")
     hubert_sess = ort.InferenceSession(HUBERT_PATH, opts)
-    voice_sess  = ort.InferenceSession(MODEL_PATH, opts)
+    print("[DEBUG] HuBERT loaded successfully")
 
-    # --- MODEL INTROSPECTION (DEBUG) ---
+    print(f"[DEBUG] Loading Voice Model from: {MODEL_PATH}")
+    voice_sess  = ort.InferenceSession(MODEL_PATH, opts)
+    print("[DEBUG] Voice Model loaded successfully")
+
     print("\n[DEBUG] Voice Model Expected Inputs:")
     model_inputs = voice_sess.get_inputs()
     for i in model_inputs:
@@ -63,15 +77,16 @@ except Exception as e:
 
 # --- INIT RESAMPLERS ---
 try:
-    # 1. Voice Model Input (Not used for features, but used for volume envelope if needed)
-    input_resampler = torchaudio.transforms.Resample(INPUT_SR, MODEL_SAMPLE_RATE)
-
-    # 2. Output (40k -> 48k)
-    output_resampler = torchaudio.transforms.Resample(MODEL_SAMPLE_RATE, TARGET_SAMPLE_RATE)
-
-    # 3. Analysis (48k -> 16k) - CRITICAL for HuBERT and Crepe
+    print("[DEBUG] Initializing Resamplers...")
+    # Analysis resampler: 48k -> 16k (for HuBERT and Crepe)
     analysis_resampler = torchaudio.transforms.Resample(INPUT_SR, 16000)
-    print("Torchaudio Resamplers Initialized.")
+    print(f"[DEBUG] Analysis Resampler: {INPUT_SR} Hz -> 16000 Hz")
+
+    # Output resampler: 40k -> 48k (for C++ playback)
+    output_resampler = torchaudio.transforms.Resample(MODEL_SAMPLE_RATE, TARGET_SAMPLE_RATE)
+    print(f"[DEBUG] Output Resampler: {MODEL_SAMPLE_RATE} Hz -> {TARGET_SAMPLE_RATE} Hz")
+
+    print("[DEBUG] Torchaudio Resamplers Initialized Successfully.")
 except Exception as e:
     print("Error initializing torchaudio:", e)
     sys.exit(1)
@@ -82,7 +97,6 @@ def f0_to_coarse(f0):
     f0_mel_min = 1127 * np.log(1 + 50 / 700)
     f0_mel_max = 1127 * np.log(1 + 1100 / 700)
 
-    # Normalize to 1-255 range
     f0_coarse = (f0_mel - f0_mel_min) * 254 / (f0_mel_max - f0_mel_min) + 1
     f0_coarse[f0_mel <= f0_mel_min] = 1
     f0_coarse[f0_mel >= f0_mel_max] = 255
@@ -91,55 +105,62 @@ def f0_to_coarse(f0):
 
 # --- AUDIO PROCESSING ---
 def process_audio(data, pitch_shift):
-    # DEBUG PRINT
-    print(f"  >>> [DEBUG] Python Received Pitch Shift: {pitch_shift}")
+    print("\n" + "="*60)
+    print("STARTING AUDIO PROCESSING")
+    print("="*60)
+    print(f"[DEBUG] Pitch Shift: {pitch_shift} semitones")
+    print(f"[DEBUG] Received {len(data)//4} samples ({len(data)} bytes)")
 
     try:
         t_start = time.time()
         audio_raw = np.frombuffer(data, dtype=np.float32).copy()
+        print(f"[DEBUG] Input audio: {audio_raw.shape}, range [{np.min(audio_raw):.4f}, {np.max(audio_raw):.4f}]")
 
-        # Amplitude Safety Check
         if np.max(np.abs(audio_raw)) < 0.01:
             print("[WARNING] Audio is near SILENCE.")
 
-        if len(audio_raw) < 1600: return b''
+        if len(audio_raw) < 1600:
+            print("[ERROR] Audio too short")
+            return b''
 
-        # PREPARE TENSORS
         audio_tensor = torch.from_numpy(audio_raw)
 
-        # 1. Analysis Audio (16k) for Pitch & Content
+        # Downsample to 16k for analysis (HuBERT and Crepe)
+        print(f"[DEBUG] Resampling to 16kHz for analysis...")
         audio_16k_tensor = analysis_resampler(audio_tensor)
         audio_16k = audio_16k_tensor.numpy()
+        print(f"[DEBUG] 16kHz audio: {audio_16k.shape} samples")
 
-        # 2. HUBERT (CONTENT)
-        # Using 16k audio (Correct)
+        # HUBERT (CONTENT)
+        print("[DEBUG] Running HuBERT...")
         inp = audio_16k[np.newaxis, np.newaxis, :].astype(np.float32)
         embed = hubert_sess.run(["embed"], {"source": inp})[0]
+        print(f"[DEBUG] HuBERT output: {embed.shape}")
 
-        # Transpose logic: (1, 768, T) -> (1, T, 768)
-        # This matches Standard RVC V2
+        # Transpose: (1, 768, T) -> (1, T, 768)
         if embed.ndim == 3 and embed.shape[1] == 768:
             embed = np.transpose(embed, (0, 2, 1))
+            print(f"[DEBUG] Transposed to: {embed.shape}")
 
-        # 3. INDEX MIXING
+        # INDEX MIXING
         if index is not None and INDEX_RATE > 0:
+            print(f"[DEBUG] Applying Index (rate={INDEX_RATE})...")
             try:
                 query = embed.squeeze(0).astype(np.float32)
                 D, I = index.search(query, 1)
                 retrieved = index.reconstruct_batch(I.flatten().astype(np.int64))
-                weight = INDEX_RATE
-                embed_mixed = (query * (1 - weight)) + (retrieved * weight)
+                embed_mixed = (query * (1 - INDEX_RATE)) + (retrieved * INDEX_RATE)
                 embed = embed_mixed[np.newaxis, :, :]
+                print(f"[DEBUG] Index mixed: {embed.shape}")
             except Exception as e:
-                pass
+                print(f"[WARN] Index mixing failed: {e}")
 
         T = embed.shape[1]
+        print(f"[DEBUG] Time steps: {T}")
 
-        # 4. PITCH DETECTION (CREPE)
-        f0 = None
+        # PITCH DETECTION (CREPE)
         try:
-            # Using 'tiny' for speed, 'full' for accuracy.
-            # If tiny is too bad, switch back to full.
+            print("[DEBUG] Running CREPE...")
             f0 = torchcrepe.predict(
                 audio_16k_tensor.unsqueeze(0),
                 16000,
@@ -152,52 +173,67 @@ def process_audio(data, pitch_shift):
                 decoder=torchcrepe.decode.weighted_argmax
             )
             f0 = f0.squeeze(0).numpy()
+            print(f"[DEBUG] CREPE output: {f0.shape}")
 
-            # Interpolate to match Hubert Time Steps
+            # Interpolate to match HuBERT frames
             if len(f0) != T:
                 f0 = np.interp(np.linspace(0, len(f0), T), np.arange(len(f0)), f0).astype(np.float32)
 
-            # DEBUG: Print Pitch
-            avg_p = np.mean(f0[f0 > 0]) if np.any(f0 > 0) else 0
-            print(f"[DEBUG] Original Pitch: {avg_p:.1f} Hz")
+            voiced = f0 > 0
+            if np.any(voiced):
+                avg_pitch = np.mean(f0[voiced])
+                print(f"[DEBUG] Original pitch: {avg_pitch:.1f} Hz ({np.sum(voiced)}/{len(f0)} voiced)")
+            else:
+                print("[WARN] No voiced frames detected!")
 
         except Exception as e:
-            print(f"[ERROR] Crepe Crashed: {e}")
+            print(f"[ERROR] CREPE failed: {e}")
             f0 = np.zeros(T, dtype=np.float32)
 
-        # 5. PITCH SHIFTING
+        # PITCH SHIFTING
         f0 = np.asarray(f0, dtype=np.float32)
         factor = 2 ** (pitch_shift / 12.0)
         f0 *= factor
 
-        # 6. COARSE PITCH
+        voiced = f0 > 0
+        if np.any(voiced):
+            print(f"[DEBUG] Shifted pitch: {np.mean(f0[voiced]):.1f} Hz (factor={factor:.3f})")
+
+        # COARSE PITCH
         pitch_coarse = f0_to_coarse(f0)
 
         inputs = {
             "feats": embed,
             "p_len": np.array([T], dtype=np.int64),
-            "pitch": pitch_coarse[None, :], # Correct Coarse Pitch
-            "pitchf": f0[None, :],          # Correct Fine Pitch
+            "pitch": pitch_coarse[None, :],
+            "pitchf": f0[None, :],
             "sid": np.array([0], dtype=np.int64)
         }
 
+        # RUN VOICE MODEL (outputs at 40kHz)
+        print("[DEBUG] Running Voice Model...")
         out = voice_sess.run(["audio"], inputs)[0]
         out = np.squeeze(out).astype(np.float32)
 
         if out.ndim > 1:
             out = out.reshape(-1)
 
-        if MODEL_SAMPLE_RATE != TARGET_SAMPLE_RATE:
-            out_tensor = torch.from_numpy(out)
-            out_tensor = output_resampler(out_tensor)
-            out = out_tensor.numpy()
+        print(f"[DEBUG] Model output: {len(out)} samples at 40kHz = {len(out)/MODEL_SAMPLE_RATE:.2f}s")
 
-        process_time = time.time() - t_start
-        print(f"  -> Processed in {process_time:.2f}s")
+        # RESAMPLE 40k -> 48k for playback
+        print(f"[DEBUG] Resampling to 48kHz...")
+        out_tensor = torch.from_numpy(out)
+        out_tensor = output_resampler(out_tensor)
+        out = out_tensor.numpy()
+
+        print(f"[DEBUG] Final output: {len(out)} samples at 48kHz = {len(out)/TARGET_SAMPLE_RATE:.2f}s")
+        print(f"[DEBUG] Processing time: {time.time() - t_start:.2f}s")
+        print("="*60 + "\n")
+
         return out.astype(np.float32).tobytes()
 
     except Exception as e:
-        print("[ERROR] process_audio:", e)
+        print("[ERROR] Processing failed:", e)
         traceback.print_exc()
         return b''
 
@@ -209,6 +245,10 @@ def recvall(sock, n):
         data += chunk
     return data
 
+print("\n" + "="*60)
+print("SERVER READY - Waiting for C++ Client...")
+print("="*60 + "\n")
+
 while True:
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -217,6 +257,7 @@ while True:
             s.listen()
             conn, addr = s.accept()
             with conn:
+                print(f"[DEBUG] Connected: {addr}")
                 while True:
                     header = recvall(conn, 8)
                     if not header: break
@@ -232,8 +273,8 @@ while True:
                             else:
                                 conn.sendall(struct.pack('i', 0))
                         except Exception as e:
-                            print(f"Inference Error: {e}")
+                            print(f"[ERROR] Inference failed: {e}")
                             conn.sendall(struct.pack('i', 0))
     except Exception as e:
-        print("Socket Error:", e)
+        print("[ERROR] Socket error:", e)
         traceback.print_exc()
