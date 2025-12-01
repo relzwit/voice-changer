@@ -5,7 +5,6 @@ import numpy as np
 import torchaudio
 
 # --- NEURAL NETWORK ARCHITECTURE ---
-# This is the standard RMVPE architecture used by RVC.
 
 class BiGRU(nn.Module):
     def __init__(self, input_features, hidden_features, num_layers):
@@ -101,7 +100,10 @@ class RMVPE:
             self.device = device
 
         print(f"[RMVPE] Loading model from {model_path} on {self.device}")
-        self.model = E2E(4, 5, 256)
+
+        # 360 Classes is standard for rmvpe.pt
+        self.model = E2E(360, 5, 256)
+
         ckpt = torch.load(model_path, map_location=self.device)
         self.model.load_state_dict(ckpt, strict=False)
         self.model.to(self.device)
@@ -130,7 +132,6 @@ class RMVPE:
         return spec
 
     def infer_from_audio(self, audio, thred=0.03):
-        # Audio must be 16k sample rate for RMVPE
         audio = audio.to(self.device)
         mel = self.mel_spectrogram(audio, 1024, 128, 16000, 160, 1024, 30, 8000)
         mel = F.interpolate(mel.unsqueeze(1), size=(256, mel.shape[2]), mode='bilinear', align_corners=True).squeeze(1)
@@ -139,21 +140,20 @@ class RMVPE:
             pred = self.model(mel.unsqueeze(0))
             prob = torch.sigmoid(pred.squeeze(0))
 
-        prob = prob.permute(1, 0)
-        prob = prob[1:] # remove silence class
+        prob = prob.permute(1, 0) # [Time, 360]
+        prob = prob[1:]
 
-        # Weighted argmax decoding
-        f0 = torch.zeros(prob.shape[1], device=self.device)
+        # --- DEBUG: Print Confidence ---
+        global_max_prob = torch.max(prob)
+        if global_max_prob < 0.1:
+            print(f"[RMVPE DEBUG] Low Confidence! Max Prob: {global_max_prob:.4f}")
+        # -------------------------------
 
-        # To save 100 lines of Viterbi code, we use a simple Argmax which works 99% as well for speech
-        # The model outputs 360 bins (cents). We convert bin -> frequency.
-        # This implementation is a "Lightweight" decoder.
-        for i in range(prob.shape[1]):
-            max_prob, idx = torch.max(prob[:, i], dim=0)
+        f0 = torch.zeros(prob.shape[0], device=self.device)
+
+        for i in range(prob.shape[0]):
+            max_prob, idx = torch.max(prob[i], dim=0)
             if max_prob > thred:
-                # Formula: Bin to Frequency
-                # f0 = 10 * (2 ** (cents / 1200))
-                # cents = idx * 20 + 1997.3794084376191
                 f0[i] = 10 * (2 ** ((idx * 20 + 1997.3794084376191) / 1200))
 
         return f0.cpu().numpy()

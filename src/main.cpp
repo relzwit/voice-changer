@@ -2,35 +2,36 @@
 
 #include <iostream>
 #include <vector>
-#include <thread>   // For std::thread (background worker)
-#include <atomic>   // For thread-safe flags
-#include <cstring>  // For memcpy
+#include <thread>
+#include <atomic>
+#include <cstring>
 #include <cmath>
 #include <algorithm>
 #include <iomanip>
 #include <chrono>
 #include <limits>
-#include <future>   // For std::async
+#include <future>
 #include <fstream>
 #include <string>
 
-// Audio Driver Implementation.
 #define MINIAUDIO_IMPLEMENTATION
 #include <miniaudio.h>
 
 #include "Utils.h"
-#include "Denoise.h"
+// REMOVED: #include "Denoise.h" <--- DELETED
 #include "PythonBridge.h"
 
 // --- SETTINGS ---
 struct AppConfig {
-    float pitch_shift_semitones = 12.0f; // +1 Octave
+    // CHANGED: 12.0f -> 0.0f
+    // Crepe is already doubling our octave detection, so we don't need to shift further.
+    float pitch_shift_semitones = 12.0f;
     float recording_duration = 5.0f;
 } g_config;
 
 // --- STATE ---
-AudioRingBuffer g_rb_input;  // Microphone -> RingBuffer
-AudioRingBuffer g_rb_output; // RingBuffer -> Speakers
+AudioRingBuffer g_rb_input;
+AudioRingBuffer g_rb_output;
 
 std::atomic<bool> g_running(true);
 std::atomic<bool> g_is_recording(false);
@@ -57,16 +58,13 @@ void convert_from_internal(const float* pInternalBuffer, float* pOutput, ma_uint
 
 // --- AUDIO CALLBACK ---
 void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uint32 frameCount) {
-    // 1. Capture Microphone Input
     float tempInput[4096 * INTERNAL_CHANNELS];
     convert_to_internal((const float*)pInput, tempInput, frameCount, pDevice->capture.channels);
     g_rb_input.Write(tempInput, frameCount * INTERNAL_CHANNELS);
 
-    // 2. Prepare Speaker Output
     float tempOutput[4096 * INTERNAL_CHANNELS];
     size_t required  = frameCount * INTERNAL_CHANNELS;
     size_t available = g_rb_output.AvailableRead();
-
     size_t toRead    = (available >= required) ? required : available;
 
     g_rb_output.Read(tempOutput, toRead);
@@ -74,7 +72,6 @@ void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
     ma_uint32 framesRead = toRead / INTERNAL_CHANNELS;
     if (framesRead > 0) convert_from_internal(tempOutput, (float*)pOutput, framesRead, pDevice->playback.channels);
 
-    // Fill silence if needed
     if (framesRead < frameCount) {
         ma_uint32 remaining = (frameCount - framesRead) * pDevice->playback.channels;
         ma_uint32 offset    = framesRead * pDevice->playback.channels;
@@ -85,16 +82,13 @@ void data_callback(ma_device* pDevice, void* pOutput, const void* pInput, ma_uin
 
 // --- WORKER THREAD ---
 void processing_thread_func() {
-    DenoiseEngine denoiser;
-
-    // NOTE: Removed hardcoded INPUT_GAIN and tanh here.
+    // REMOVED: DenoiseEngine denoiser; <--- DELETED
 
     std::vector<float> burst_buffer;
     burst_buffer.reserve(48000 * 60);
 
     const size_t WORK_SIZE = 1024 * 2;
     std::vector<float> input_chunk(WORK_SIZE);
-
     std::vector<float> mono;
     mono.reserve(WORK_SIZE/2);
 
@@ -102,7 +96,6 @@ void processing_thread_func() {
         if (g_rb_input.AvailableRead() >= WORK_SIZE) {
             g_rb_input.Read(input_chunk.data(), WORK_SIZE);
 
-            // 1. REPLAY MODE
             if (g_is_replaying) {
                 if (!g_last_recording.empty()) {
                     std::cout << "\r[REPLAYING]..." << std::flush;
@@ -115,65 +108,66 @@ void processing_thread_func() {
                 continue;
             }
 
-            // 2. IDLE DRAIN
             if (!g_is_recording) {
                 if (!burst_buffer.empty()) burst_buffer.clear();
                 continue;
             }
 
-            // 3. RECORDING PROCESSING
+            // Processing: Convert Stereo to Mono
+            // We still need to do this because the AI expects Mono input.
             mono.clear();
             for (size_t i=0; i < WORK_SIZE/2; ++i) {
                 mono.push_back((input_chunk[i*2] + input_chunk[i*2+1]) * 0.5f);
             }
 
-            // Run AI Denoising (RNNoise)
-            denoiser.Process(mono);
+            // REMOVED: denoiser.Process(mono); <--- DELETED
+            // We now insert the raw, untreated mono audio directly.
 
-            // Store raw, clean audio.
-            // We do NOT apply gain or distortion here anymore.
             burst_buffer.insert(burst_buffer.end(), mono.begin(), mono.end());
 
-            // Update progress bar
             if (burst_buffer.size() % 4096 == 0) {
                 std::cout << "\r[REC] " << std::fixed << std::setprecision(1)
                           << (float)burst_buffer.size() / INTERNAL_SAMPLE_RATE << "s / "
                           << g_config.recording_duration << "s   " << std::flush;
             }
 
-            // 4. TRIGGER AI PROCESSING
+            // TRIGGER
             size_t target_samples = static_cast<size_t>(g_config.recording_duration * INTERNAL_SAMPLE_RATE);
             if (burst_buffer.size() >= target_samples) {
                 g_is_processing = true;
                 std::cout << "\n[PROCESSING] Preparing audio..." << std::flush;
 
-                // --- NEW STEP: PEAK NORMALIZATION ---
-                // Scan for the loudest peak
+                // --- PEAK NORMALIZATION ---
                 float max_val = 0.0f;
                 for (float s : burst_buffer) {
                     float abs_s = std::abs(s);
                     if (abs_s > max_val) max_val = abs_s;
                 }
 
-                // If peak is detected, normalize entire buffer to 0.9 (90% volume)
-                // This maximizes volume without 'tanh' distortion.
                 if (max_val > 0.001f) {
                     float normalization_factor = 0.9f / max_val;
-                    // Cap boost to 5x to prevent amplifying silence to static
                     if (normalization_factor > 5.0f) normalization_factor = 5.0f;
-
                     for (float &s : burst_buffer) s *= normalization_factor;
                 }
 
-                std::cout << "\r[PROCESSING] Sending to AI..." << std::flush;
+                // --- DEBUG MONITOR: PLAY RAW AUDIO BEFORE SENDING ---
+                std::cout << "\n[DEBUG] Playing captured audio for verification..." << std::endl;
+                std::vector<float> debug_stereo;
+                debug_stereo.reserve(burst_buffer.size() * 2);
+                for(float s : burst_buffer) { debug_stereo.push_back(s); debug_stereo.push_back(s); }
 
-                // --- CHANGED: SEND RAW 48k AUDIO ---
-                // We no longer call Resample48To40 here. We let Python do it.
+                g_rb_output.Write(debug_stereo.data(), debug_stereo.size());
+
+                float play_time = (float)burst_buffer.size() / 48000.0f;
+                std::this_thread::sleep_for(std::chrono::milliseconds((int)(play_time * 1000) + 500));
+                // ----------------------------------------------------
+
+                std::cout << "[PROCESSING] Sending " << burst_buffer.size() << " samples to AI..." << std::flush;
+
                 auto future_result = std::async(std::launch::async, [&]() {
                     return g_bridge.ProcessAudio(burst_buffer, static_cast<int>(g_config.pitch_shift_semitones));
                 });
 
-                // C. Spinner Animation
                 const char spinner[] = {'|','/','-','\\'};
                 int spin_idx = 0;
                 while (future_result.wait_for(std::chrono::milliseconds(100)) != std::future_status::ready) {
@@ -183,19 +177,14 @@ void processing_thread_func() {
                 auto processed = future_result.get();
 
                 if (!processed.empty()) {
-                    // D. Elastic Resample
-                    // We still use this to ensure the playback buffer matches exactly what the speakers expect.
                     auto output = ResampleToCount(processed, burst_buffer.size());
-
-                    // Convert Mono back to Stereo
                     std::vector<float> stereo;
                     stereo.reserve(output.size()*2);
                     for (float s : output) { stereo.push_back(s); stereo.push_back(s); }
 
-                    // Save and Play
                     g_last_recording = stereo;
                     g_rb_output.Write(stereo.data(), stereo.size());
-                    std::cout << "\r[PLAYING]           " << std::endl;
+                    std::cout << "\r[PLAYING AI RESULT]     " << std::endl;
                 } else {
                     std::cout << "\r[PYTHON ERROR]     " << std::endl;
                 }
@@ -237,46 +226,15 @@ int main() {
     std::thread ai_thread(processing_thread_func);
     if (ma_device_start(&device) != MA_SUCCESS) return -1;
 
-    // UI LOOP
     while (true) {
         std::cout << "\n----------------------------------------\n";
-        std::cout << "### enter recording length (seconds):" << std::endl;
-        std::cout << "### (-1 to replay previous)" << std::endl;
-        std::cout << "### (0 to Quit)" << std::endl;
-        std::cout << "> ";
-
+        std::cout << "### enter recording length (seconds) (0 to Quit): ";
         float input;
-        if (!(std::cin >> input)) {
-            std::cin.clear();
-            std::cin.ignore(10000, '\n');
-            continue;
-        }
+        if (!(std::cin >> input)) { std::cin.clear(); std::cin.ignore(10000, '\n'); continue; }
 
-        if (input == 0) {
-            std::cout << "\n----------------------------------------\n";
-            std::cout << "               TODO LIST                \n";
-            std::cout << "----------------------------------------\n";
-
-            std::ifstream file("todo.txt");
-            if (!file.is_open()) file.open("../todo.txt");
-
-            if (file.is_open()) {
-                std::cout << file.rdbuf() << std::endl;
-            } else {
-                std::cout << "[ERROR] Could not find 'todo.txt'." << std::endl;
-            }
-            std::cout << "----------------------------------------\n";
-            std::cout << "Exiting..." << std::endl;
-            break;
-        }
-
-        if (input == -1) {
-            g_is_replaying = true;
-            g_is_processing = true;
-        } else {
-            g_config.recording_duration = input;
-            g_is_recording = true;
-        }
+        if (input == 0) break;
+        if (input == -1) { g_is_replaying = true; g_is_processing = true; }
+        else { g_config.recording_duration = input; g_is_recording = true; }
 
         while (g_is_recording || g_is_processing) std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
