@@ -1,8 +1,7 @@
-- animated, in place, loading ellipses that refreshes with every server.py output print
-- animated progress bar for logs with a quantity
-- spinner or ellipses for waiting logs
+- animated progress bars for logs
 - allow user to choose pitch shift
 - client should go back to "waiting for server" if server crashes
+- move vcpkg to a more suitable location
 
 - swap to RMVPE from Torchcrepe
 - find a more fitting model
