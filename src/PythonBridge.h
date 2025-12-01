@@ -1,3 +1,5 @@
+// /src/PythonBridge.h
+
 // --- HEADER GUARDS ---
 // These lines prevent this file from being pasted into your program twice.
 // If you include "PythonBridge.h" in both main.cpp and another file,

@@ -1,2 +1,3 @@
 - swap to RMVPE from Torchcrepe
 - DONE ---- swap to torchaudio from scipy
+- find a 48k model

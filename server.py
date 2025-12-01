@@ -1,3 +1,5 @@
+# server.py
+
 import socket             # Standard networking library (TCP/IP).
 import struct             # Binary data packing (to read C++ structs).
 import numpy as np        # Heavy math library for matrix operations.
