@@ -1,0 +1,37 @@
+for when male voice:
+
+
+
+The Problem: Accidental Time-Stretching
+Your RVC model architecture works like this:
+
+Takes HuBERT features (250 time steps)
+Outputs a fixed ratio of audio samples per time step
+Specifically: 400 samples per HuBERT frame at 40kHz
+So 250 frames × 400 = 100,000 samples at 40kHz (2.5 seconds)
+
+This is CORRECT behavior! The model doesn't output the same duration as input - it outputs based on the content features.
+What Was Going Wrong:
+In main.cpp, you had this line:
+auto output = ResampleToCount(processed, burst_buffer.size());
+This was saying: "Take the Python output and stretch it to match the input buffer size"
+The math that killed your voice:
+
+Input: 240,640 samples at 48kHz = 5.01 seconds
+Model output: 100,000 samples at 40kHz → resampled to 120,000 at 48kHz = 2.5 seconds
+ResampleToCount stretched 120k samples → 240k samples (doubling the duration)
+Result: Audio plays at half speed → pitch drops by 12 semitones (one octave) → male voice
+
+It's like playing a record at 33 RPM instead of 45 RPM!
+Why Did This Line Exist?
+Looking at your old working code, you had the same line! But the old flow was:
+
+C++ resampled to 40k before sending
+Python processed and returned 40k audio
+ResampleToCount stretched it slightly to match
+Then played at 48kHz (which compensated for the stretch)
+
+It was a lucky accident that worked! But when you changed the pipeline to have Python handle all resampling, that elastic stretch became destructive.
+The Fix:
+Just trust Python's output! It's already at 48kHz and the correct pitch. No stretching needed.
+You're back in business! 🎤✨
