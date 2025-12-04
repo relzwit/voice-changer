@@ -14,5 +14,5 @@ Looking at the commits, i achieved the Minimal Viable Product 18 hours ago......
 ------
 
 Used for loading bars:
-
+honestly was so hard making shit from scratch, glad to have found this repo.
 https://github.com/p-ranav/indicators?tab=readme-ov-file
