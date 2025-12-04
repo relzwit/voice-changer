@@ -15,5 +15,5 @@ Used for loading bars:
 honestly was so hard making shit from scratch, glad to have found this repo.
 =======
 
->>>>>>> a196952373d2c0ec90cf2d527c1202ae06ef1f26
+>>>>>>> a196952373d2c0ec90cf2c1202ae06ef1f26 -- uh..... i dont remember pasting this in. wtf. did nvim glitch out? hopefully its not some api key or smthn
 https://github.com/p-ranav/indicators?tab=readme-ov-file
