@@ -1,10 +1,4 @@
-Well, if you are wondering what this whole thing is. It is a project I made...
-by prompting AI for the last idk....15ish hours? Split up by sleep and other activities.
-I do not know C++ or how to use AI with Python.
-This program is almost completely AI-written code.
 
-I do want to go over it eventually and slowly understand everything that has been done.
-This is why I made the AI comment so heavily.
 
 Here is the AI explanation of the project:
 
