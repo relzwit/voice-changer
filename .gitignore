@@ -10,4 +10,5 @@ venv/
 /home/relz/code/voice-changer/vcpkg
 
 # dont want my sussy recording on github lol
-saved_outputs/
+saved_outputs/*
+#add some sample files someday
