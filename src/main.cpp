@@ -35,34 +35,34 @@
 
 // --- CONFIGURATION MANAGEMENT ---
 // Function to load settings (pitch shift and recording duration) from a config.ini file.
-void load_config(float& pitch_shift, float& duration) {
-    std::ifstream file("config.ini"); // Open the configuration file.
-    if (!file.is_open()) return;      // If the file cannot be opened, use default settings and exit.
-
-    std::string line; // Variable to hold the current line read from the file.
-    while (std::getline(file, line)) { // Read the file line by line.
-        if (line.empty() || line[0] == '[' || line[0] == ';') continue; // Skip empty lines, section headers, and comments.
-
-        std::size_t equalPos = line.find('='); // Find the position of the '=' sign.
-        if (equalPos == std::string::npos) continue; // Skip lines without an '=' sign.
-
-        std::string key = line.substr(0, equalPos);      // Extract the key (before '=').
-        std::string value = line.substr(equalPos + 1);   // Extract the value (after '=').
-
-        // Trim leading and trailing whitespace from the key.
-        key.erase(0, key.find_first_not_of(" \t"));
-        key.erase(key.find_last_not_of(" \t") + 1);
-        // Trim leading and trailing whitespace from the value.
-        value.erase(0, value.find_first_not_of(" \t"));
-        value.erase(value.find_last_not_of(" \t") + 1);
-
-        if (key == "PITCH_SHIFT_SEMITONES") {
-            try { pitch_shift = std::stof(value); } catch (...) {} // Convert value to float for pitch shift. Handle conversion errors gracefully.
-        } else if (key == "RECORDING_DURATION_SECONDS") {
-            try { duration = std::stof(value); } catch (...) {} // Convert value to float for recording duration. Handle conversion errors gracefully.
-        }
-    }
-}
+// void load_config(float& pitch_shift, float& duration) {
+//     std::ifstream file("config.ini"); // Open the configuration file.
+//     if (!file.is_open()) return;      // If the file cannot be opened, use default settings and exit.
+//
+//     std::string line; // Variable to hold the current line read from the file.
+//     while (std::getline(file, line)) { // Read the file line by line.
+//         if (line.empty() || line[0] == '[' || line[0] == ';') continue; // Skip empty lines, section headers, and comments.
+//
+//         std::size_t equalPos = line.find('='); // Find the position of the '=' sign.
+//         if (equalPos == std::string::npos) continue; // Skip lines without an '=' sign.
+//
+//         std::string key = line.substr(0, equalPos);      // Extract the key (before '=').
+//         std::string value = line.substr(equalPos + 1);   // Extract the value (after '=').
+//
+//         // Trim leading and trailing whitespace from the key.
+//         key.erase(0, key.find_first_not_of(" \t"));
+//         key.erase(key.find_last_not_of(" \t") + 1);
+//         // Trim leading and trailing whitespace from the value.
+//         value.erase(0, value.find_first_not_of(" \t"));
+//         value.erase(value.find_last_not_of(" \t") + 1);
+//
+//         if (key == "PITCH_SHIFT_SEMITONES") {
+//             try { pitch_shift = std::stof(value); } catch (...) {} // Convert value to float for pitch shift. Handle conversion errors gracefully.
+//         } else if (key == "RECORDING_DURATION_SECONDS") {
+//             try { duration = std::stof(value); } catch (...) {} // Convert value to float for recording duration. Handle conversion errors gracefully.
+//         }
+//     }
+// }
 
 // --- SETTINGS ---
 // Structure to hold the global application configuration.
@@ -284,13 +284,13 @@ void processing_thread_func() {
 
 // --- MAIN FUNCTION ---
 int main() {
-    load_config(g_config.pitch_shift_semitones, g_config.recording_duration); // Load pitch shift and duration from config.ini.
+    // load_config(g_config.pitch_shift_semitones, g_config.recording_duration); // Load pitch shift and duration from config.ini.
+
 
     // Print initial header and configuration settings.
     std::cout << "========================================\n";
-    std::cout << "      RVC VOICE CHANGER - C++ CLIENT    \n";
+    std::cout << "                RVC CLIENT              \n";
     std::cout << "========================================\n";
-    std::cout << "[Client] Pitch shift: " << g_config.pitch_shift_semitones << " semitones." << std::endl;
 
 
     // --- PROGRESS BAR INITIALIZATION ---
@@ -365,7 +365,7 @@ int main() {
         // Display user prompt and commands.
         std::cout << "\n----------------------------------------\n";
         std::cout << "### Enter command or seconds to record:\n";
-        std::cout << "### (-1: Replay, 's': Save Last Clip, 'q': Quit)\n> ";
+        std::cout << "### (-1: Replay, 's': Save Last Clip, 'q': Quit, '-2': Select Pitch)\n> ";
 
         // Read user input. Continue if input is empty.
         if (!std::getline(std::cin, input_line) || input_line.empty()) continue;
@@ -402,10 +402,17 @@ int main() {
         // Try to convert the input to a float (seconds to record or -1 for replay).
         float input_float = 0.0f;
         try { input_float = std::stof(input_line); } catch (...) {
-            std::cout << "[ERROR] Invalid input. Enter seconds, 's', or 'q'." << std::endl;
+            std::cout << "[ERROR] Invalid input. Enter seconds, 's', -1, 'q', or '-2'." << std::endl;
             continue;
         }
 
+        // Handle the new pitch command.
+        if (input_float == -2) {
+            std::cout << "Enter new pitch value: ";
+            std::cin >> g_config.pitch_shift_semitones;
+            std::cout << g_config.pitch_shift_semitones << "pitch selected";
+            continue;
+        }
         // Handle the replay command.
         if (input_float == -1) { g_is_replaying = true; g_is_processing = true; } // Set replay flag. g_is_processing blocks new recordings.
         // Handle the record command.

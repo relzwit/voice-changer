@@ -8,3 +8,5 @@ models/*
 venv/
 
 /home/relz/code/voice-changer/vcpkg
+
+/home/relz/code/voice-changer/saved_outputs
