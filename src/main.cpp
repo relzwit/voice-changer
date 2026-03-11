@@ -104,6 +104,7 @@ bool SaveWavFile(const std::vector<float>& buffer, const std::string& filename, 
     long chunkSize = 36 + dataSize; // Total file size minus "RIFF" and "chunkSize".
 
     // RIFF Chunk
+    // just adding a comment to test my gh setup on desktop
     file.write("RIFF", 4);
     file.write((char*)&chunkSize, 4);
     file.write("WAVE", 4);
